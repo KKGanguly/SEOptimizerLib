@@ -1,0 +1,53 @@
+{
+  "stats": {
+    "submitted": 1,
+    "finished": 1,
+    "running": 0
+  },
+  "data": [
+    {
+      "config_id": 1,
+      "instance": null,
+      "seed": 1165313289,
+      "budget": null,
+      "cost": 0.10813763562982479,
+      "time": 0.0035109519958496094,
+      "cpu_time": 0.0034984530000023994,
+      "status": 1,
+      "starttime": 1770793603.3620148,
+      "endtime": 1770793603.60325,
+      "additional_info": {}
+    }
+  ],
+  "configs": {
+    "1": {
+      " ACAP": 3.219,
+      " AEXP": 3.626,
+      " CPLx": 2.679,
+      " DOCU": 4.506,
+      " ETAT": 3.801,
+      " FLEx": 4.1,
+      " KLOC": 37.951,
+      " LTEx": 2.417,
+      " PCAP": 3.03,
+      " PCON": 4.232,
+      " PLEx": 3.291,
+      " PMAT": 2.281,
+      " PREC": 1.479,
+      " PVOL": 4.731,
+      " RELY": 3.301,
+      " RESL": 2.4,
+      " RUSE": 5.079,
+      " SCED": 3.0,
+      " SITE": 4.307,
+      " STOR": 3.074,
+      " TEAM": 1.307,
+      " TIME": 3.595,
+      " TOOL": 2.0,
+      "DATA": 4.417
+    }
+  },
+  "config_origins": {
+    "1": "Initial Design: Sobol"
+  }
+}

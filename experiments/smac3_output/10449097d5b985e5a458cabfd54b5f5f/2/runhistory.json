@@ -1,0 +1,99 @@
+{
+  "stats": {
+    "submitted": 2,
+    "finished": 2,
+    "running": 0
+  },
+  "data": [
+    {
+      "config_id": 1,
+      "instance": null,
+      "seed": 1872583848,
+      "budget": null,
+      "cost": Infinity,
+      "time": 0.2631850242614746,
+      "cpu_time": 0.2631309900000005,
+      "status": 2,
+      "starttime": 1770791804.6369612,
+      "endtime": 1770791804.9004047,
+      "additional_info": {
+        "traceback": "Traceback (most recent call last):\n  File \"/home/kgangul/.local/lib/python3.10/site-packages/smac/runner/abstract_runner.py\", line 110, in run_wrapper\n    status, cost, runtime, cpu_time, additional_info = self.run(\n  File \"/home/kgangul/.local/lib/python3.10/site-packages/smac/runner/target_function_runner.py\", line 210, in run\n    result, additional_info = rval\nValueError: too many values to unpack (expected 2)\n",
+        "error": "ValueError('too many values to unpack (expected 2)')"
+      }
+    },
+    {
+      "config_id": 2,
+      "instance": null,
+      "seed": 1872583848,
+      "budget": null,
+      "cost": Infinity,
+      "time": 0.2658536434173584,
+      "cpu_time": 0.26583599000000113,
+      "status": 2,
+      "starttime": 1770791804.9058473,
+      "endtime": 1770791805.171952,
+      "additional_info": {
+        "traceback": "Traceback (most recent call last):\n  File \"/home/kgangul/.local/lib/python3.10/site-packages/smac/runner/abstract_runner.py\", line 110, in run_wrapper\n    status, cost, runtime, cpu_time, additional_info = self.run(\n  File \"/home/kgangul/.local/lib/python3.10/site-packages/smac/runner/target_function_runner.py\", line 210, in run\n    result, additional_info = rval\nValueError: too many values to unpack (expected 2)\n",
+        "error": "ValueError('too many values to unpack (expected 2)')"
+      }
+    }
+  ],
+  "configs": {
+    "1": {
+      " ACAP": 4.389,
+      " AEXP": 2.01,
+      " CPLx": 3.628,
+      " DOCU": 2.01,
+      " ETAT": 2.947,
+      " FLEx": 1.042,
+      " KLOC": 224.954,
+      " LTEx": 3.606,
+      " PCAP": 4.493,
+      " PCON": 4.508,
+      " PLEx": 2.102,
+      " PMAT": 2.651,
+      " PREC": 3.13,
+      " PVOL": 4.011,
+      " RELY": 3.128,
+      " RESL": 1.684,
+      " RUSE": 5.808,
+      " SCED": 3.0,
+      " SITE": 2.447,
+      " STOR": 3.79,
+      " TEAM": 2.485,
+      " TIME": 3.471,
+      " TOOL": 2.0,
+      "DATA": 3.317
+    },
+    "2": {
+      " ACAP": 3.145,
+      " AEXP": 4.5,
+      " CPLx": 1.425,
+      " DOCU": 3.32,
+      " ETAT": 4.817,
+      " FLEx": 3.555,
+      " KLOC": 164.12,
+      " LTEx": 1.766,
+      " PCAP": 3.007,
+      " PCON": 2.537,
+      " PLEx": 2.671,
+      " PMAT": 2.491,
+      " PREC": 1.289,
+      " PVOL": 3.495,
+      " RELY": 1.697,
+      " RESL": 4.406,
+      " RUSE": 2.151,
+      " SCED": 3.0,
+      " SITE": 4.404,
+      " STOR": 3.4,
+      " TEAM": 3.498,
+      " TIME": 3.562,
+      " TOOL": 2.0,
+      "DATA": 4.804
+    }
+  },
+  "config_origins": {
+    "1": "Initial Design: Sobol",
+    "2": "Initial Design: Sobol"
+  }
+}

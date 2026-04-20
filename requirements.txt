@@ -1,0 +1,13 @@
+pandas
+matplotlib
+Cmake
+scipy
+seaborn
+ConfigSpace 
+dehb
+tqdm
+smac
+optuna
+optunahub
+hebo
+numba
