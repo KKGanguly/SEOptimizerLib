@@ -105,16 +105,14 @@ class IteratedLocalSearchOptimizer(BaseOptimizer):
     # ------------------------------------------------------------------
     # Evaluation with caching and tracking
     # ------------------------------------------------------------------
-
     def _evaluate(self, hp_dict):
-        valid_hp = self._nearest_row(hp_dict)
-        key = self._row_tuple(valid_hp)
-
+        """RF surrogate scoring — no table lookup."""
+        key = self._row_tuple(hp_dict)
         if key in self.cache:
             scores, d2h_val = self.cache[key]
         else:
             try:
-                scores = tuple(self.model_wrapper.get_score(valid_hp))
+                scores = tuple(self.model_wrapper.get_score(hp_dict))
             except Exception:
                 scores = tuple(1.0 for _ in range(self.num_objectives))
             ideal = [0] * self.num_objectives
@@ -122,9 +120,8 @@ class IteratedLocalSearchOptimizer(BaseOptimizer):
             self.cache[key] = (scores, d2h_val)
 
         self.iteration += 1
-        self.track_evaluation(valid_hp, list(scores), self.iteration)
-
-        return valid_hp, scores, d2h_val
+        self.track_evaluation(hp_dict, list(scores), self.iteration)
+        return hp_dict, scores, d2h_val
 
     # ------------------------------------------------------------------
     # Neighbour generation via KD-tree

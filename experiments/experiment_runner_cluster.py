@@ -14,18 +14,7 @@ from models.configurations.model_config_static import ModelConfigurationStatic
 from models.configurations.model_config_dtlz import ModelConfigurationDTLZ
 from models.model_wrapper_static import ModelWrapperStatic
 from models.model_wrapper_dtlz import ModelWrapperDTLZ
-from optimizers.RandomSearchOptimizer import RandomSearchOptimizer
-from optimizers.NSGA2Optimizer import NSGA2Optimizer
-from optimizers.SPEA2Optimizer import SPEA2Optimizer
-from optimizers.MOSMACOptimizer import MOSMACOptimizer
-from optimizers.EZROptimizer import EZROptimizer
-from optimizers.HillClimbOptimizer import HillClimbingOptimizer
-from optimizers.SAOptimizer import SimulatedAnnealingOptimizer
-from optimizers.TSOptimizer import TabuSearchOptimizer
-from optimizers.ILSOptimizer import IteratedLocalSearchOptimizer
-from optimizers.TurBOOptimizer import TuRBOOptimizer
-from optimizers.GPEiOptimizer import GPOptimizer
-from optimizers.HEBOOptimizer import HEBOOptimizer
+from optimizers import *
 from utils.LoggingUtil import LoggingUtil
 from utils.data_loader_templated import load_data
 from utils.EncodingUtils import EncodingUtils
@@ -50,13 +39,16 @@ def init_optimizer(optimizer_name, optimizer_config, model_wrapper, model_config
         'NSGA2': NSGA2Optimizer,
         'SPEA2': SPEA2Optimizer,
         'EZR': EZROptimizer, 
-        'Hill' : HillClimbingOptimizer,
+        'HILL' : HillClimbingOptimizer,
         'SA' : SimulatedAnnealingOptimizer,
         'TS' : TabuSearchOptimizer,
         'ILS' : IteratedLocalSearchOptimizer, 
         'TURBO' : TuRBOOptimizer, 
         'GPEI' : GPOptimizer,
-        'HEBO' : HEBOOptimizer
+        'HEBO' : HEBOOptimizer, 
+        'DE' : DEOptimizer,
+        'GA' : GAOptimizer,
+        'ONEPLUSONE' : OnePlusOneESOptimizer
     }
     
     if optimizer_name not in optimizer_classes:

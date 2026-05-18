@@ -78,8 +78,16 @@ class ScottKnott:
 # ----------------- Helper Functions -----------------
 def get_optimizer_dir(results_dir: Path, optimizer_name: str) -> Path:
     folder_map = {
-        'EZR': 'EZR', 'MOSMAC': 'MOSMAC', 'NSGA2': 'NSGA2',
-        'SPEA2': 'SPEA2', 'Random': 'RandomSearch'
+        'EZR': 'EZR',
+        'MOSMAC': 'MOSMAC',
+        'NSGA2': 'NSGA2',
+        'SPEA2': 'SPEA2',
+        'Random': 'RandomSearch',
+        'SA': 'SA',
+        'HILL': 'HILL',
+        'ILS': 'ILS',
+        'GPEI': 'GPEI',
+        'HEBO': 'HEBO'
     }
     folder_name = folder_map.get(optimizer_name.split('-')[0], optimizer_name.lower())
     return results_dir / f'results_{folder_name}' / folder_name
@@ -155,7 +163,8 @@ def generate_table(
     optimizer_budgets: Dict[str, List[int]],
     output_file: str = None,
 ):
-    datasets = get_all_datasets(results_dir, 'EZR')
+    datasets = get_all_datasets(results_dir, 'HILL')
+    print("DATASETS FOUND:", datasets[:10], "TOTAL:", len(datasets))
     results_data = []
     sk = ScottKnott(alpha=0.05)
     skipped = 0

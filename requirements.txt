@@ -11,3 +11,4 @@ optuna
 optunahub
 hebo
 numba
+scikit-learn

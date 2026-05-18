@@ -32,8 +32,13 @@ class HEBOOptimizer(BaseOptimizer):
       encode: original value → index / (n_choices - 1) ∈ [0, 1]
       decode: float → round(f * (n-1)) → choices[idx] → original value
 
-    Everything outside _objective uses only original decoded values.
-    Encoding is completely invisible to the rest of the framework.
+    Scoring is now via the RF surrogate in model_wrapper.get_score().
+    The nearest-row snap has been removed — RF can score any decoded
+    config directly, not just exact table rows.
+
+    The KD-tree (self.nn / Data) is retained only for the callback
+    that stores self.best_config as a real dataset row for interpretability.
+    Everything inside _objective uses decoded values only.
     """
 
     def __init__(self, config, model_wrapper, model_config, logging_util, seed):
@@ -42,6 +47,7 @@ class HEBOOptimizer(BaseOptimizer):
         self.X_df = self.model_wrapper.X
         self.columns = list(self.X_df.columns)
 
+        # KD-tree kept for best_config snapping in callback only
         self.nn = Data(
             self.X_df.values.tolist(),
             column_types=self.model_config.column_types,
@@ -64,7 +70,7 @@ class HEBOOptimizer(BaseOptimizer):
         self._build_codec()
 
     # ------------------------------------------------------------------
-    # Codec — identical pattern to TuRBOOptimizer
+    # Codec
     # ------------------------------------------------------------------
 
     def _choices_for(self, hp):
@@ -126,6 +132,7 @@ class HEBOOptimizer(BaseOptimizer):
         return v.item() if hasattr(v, "item") else v
 
     def _nearest_row(self, hp_dict):
+        """Snap to real dataset row — used only for best_config in callback."""
         query = [hp_dict[c] for c in self.columns]
         row = self.nn.nearestRow(query)
         return {c: self._clean(v) for c, v in zip(self.columns, row)}
@@ -146,26 +153,23 @@ class HEBOOptimizer(BaseOptimizer):
 
         # 2. Decode immediately — encoding never leaves this function
         decoded = self._decode_trial_params(encoded)
+        key = self._row_tuple(decoded)
 
-        # 3. Snap to nearest real dataset row
-        valid_hp = self._nearest_row(decoded)
-        key = self._row_tuple(valid_hp)
-
-        # 4. Evaluate with cache — original values only from here
+        # 3. Score via RF surrogate — no nearest-row snap needed
         if key in self.cache:
             scores, d2h_val = self.cache[key]
         else:
             try:
-                scores = tuple(self.model_wrapper.get_score(valid_hp))
+                scores = tuple(self.model_wrapper.get_score(decoded))
             except Exception:
                 scores = tuple(1.0 for _ in range(self.num_objectives))
             ideal = [0] * self.num_objectives
             d2h_val = DistanceUtil.d2h(ideal, list(scores))
             self.cache[key] = (scores, d2h_val)
 
-        # 5. Track with original values only
+        # 4. Track with decoded values directly
         self.iteration += 1
-        self.track_evaluation(valid_hp, list(scores), self.iteration)
+        self.track_evaluation(decoded, list(scores), self.iteration)
 
         return d2h_val
 
@@ -195,7 +199,7 @@ class HEBOOptimizer(BaseOptimizer):
             if study.best_value < self.best_value:
                 self.best_value = study.best_value
                 decoded = self._decode_trial_params(study.best_trial.params)
-                self.best_config = self._nearest_row(decoded)
+                self.best_config = decoded
 
         study.optimize(
             self._objective,

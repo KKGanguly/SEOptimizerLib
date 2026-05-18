@@ -100,3 +100,4 @@ class EncodingUtils:
                     lambda x: EncodingUtils.encode_value(x, col_type)
                 )
         return df_encoded
+    

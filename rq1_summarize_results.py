@@ -1,62 +1,7 @@
 import pandas as pd
 import numpy as np
 import argparse
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────────────────────────────────────
-
-DISPLAY_NAMES = {
-    'EZR-50':     'EZR-50',
-    'EZR-100':    'EZR-100',
-    'EZR-200':    'EZR-200',
-    'EZR-1000':    'EZR-1000',
-    'MOSMAC-200':  'SMAC-200',
-    'MOSMAC-1000': 'SMAC-1000',
-    'NSGA2-200':  'NSGA-II-200',
-    'NSGA2-1000':  'NSGA-II-1000',
-    'SPEA2-200':  'SPEA2-200',
-    'SPEA2-1000':  'SPEA2-1000',
-    'Random-200':  'Random-200',
-    'Random-1000': 'Random-1000',
-}
-
-BUDGET = {
-    'EZR-50': 50,   'EZR-100': 100,  'EZR-200': 200,'EZR-1000':  1000,
-    'MOSMAC-200': 200,  'MOSMAC-1000': 1000,
-    'NSGA2-200': 200, 'NSGA2-1000': 1000, 'SPEA2-200':  200,'SPEA2-1000': 1000,
-    'Random-200': 200,  'Random-1000': 1000,
-}
-
-SUMMARY_KEYS = [
-    'EZR-50', 'EZR-100', 'EZR-200','EZR-1000',
-    'MOSMAC-200', 'MOSMAC-1000','NSGA2-200',
-    'NSGA2-1000', 'SPEA2-200','SPEA2-1000',
-    'Random-200', 'Random-1000',
-]
-
-ALL_OTHERS = [
-    'MOSMAC-200', 'MOSMAC-1000',
-    'NSGA2-200', 'SPEA2-200',
-    'NSGA2-1000', 'SPEA2-1000',
-    'Random-200', 'Random-1000',
-]
-
-NON_EZR = [
-    'MOSMAC-200', 'MOSMAC-1000',
-    'Random-200', 'Random-1000',
-    'NSGA2-200', 'SPEA2-200',
-    'NSGA2-1000', 'SPEA2-1000',
-]
-
-WTL_SECTIONS = [
-    ('EZR-50  vs all',         'EZR-50',     ALL_OTHERS),
-    ('EZR-100 vs all',         'EZR-100',    ALL_OTHERS),
-    ('EZR-200 vs all',         'EZR-200',    ALL_OTHERS),
-    ('Random-200  vs non-EZR', 'Random-200',  NON_EZR),
-    ('Random-1000 vs non-EZR', 'Random-1000', NON_EZR),
-]
+import re
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,8 +18,44 @@ def load(csv_path: str) -> pd.DataFrame:
     return df
 
 
+def infer_keys(df: pd.DataFrame):
+    """
+    Discover all optimizer-budget keys present in the CSV by looking for
+    columns that end in '_tier'.  Returns sorted list of keys like
+    ['GPEI-25', 'GPEI-50', 'HILL-100', ...].
+    """
+    keys = []
+    for col in df.columns:
+        if col.endswith('_tier'):
+            key = col[:-len('_tier')]
+            # sanity-check: must also have a _mean column
+            if f'{key}_mean' in df.columns:
+                keys.append(key)
+    # sort by optimizer name then budget number
+    def sort_key(k):
+        parts = k.rsplit('-', 1)
+        name = parts[0]
+        try:
+            bud = int(parts[1])
+        except (IndexError, ValueError):
+            bud = 0
+        return (name, bud)
+    return sorted(keys, key=sort_key)
+
+
+def build_budget_map(keys):
+    bmap = {}
+    for k in keys:
+        parts = k.rsplit('-', 1)
+        try:
+            bmap[k] = int(parts[1])
+        except (IndexError, ValueError):
+            bmap[k] = 0
+    return bmap
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Table 1 – Summary stats
+# Formatting helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def format_runtime(seconds: float) -> str:
@@ -88,33 +69,35 @@ def format_runtime(seconds: float) -> str:
         return f'{seconds / 3600:.1f}h'
 
 
-def summary_stats(df: pd.DataFrame, keys: list) -> pd.DataFrame:
+# ─────────────────────────────────────────────────────────────────────────────
+# Table 1 – Summary stats
+# ─────────────────────────────────────────────────────────────────────────────
+
+def summary_stats(df: pd.DataFrame, keys: list, budget_map: dict) -> pd.DataFrame:
     rows = []
     for key in keys:
         tier_col = f'{key}_tier'
         mean_col = f'{key}_mean'
-        rt_col   = f'{key}_runtime_mean'   # total seconds for the full run
+        rt_col   = f'{key}_runtime_mean'
 
-        tiers = df[tier_col].dropna()
-        means = df[mean_col].dropna()
-        rts   = df[rt_col].dropna()
+        tiers = df[tier_col].dropna() if tier_col in df.columns else pd.Series([], dtype=float)
+        means = df[mean_col].dropna() if mean_col in df.columns else pd.Series([], dtype=float)
+        rts   = df[rt_col].dropna()   if rt_col   in df.columns else pd.Series([], dtype=float)
 
         n      = len(tiers)
-        bud    = BUDGET[key]
+        bud    = budget_map.get(key, 0)
 
         t1     = int((tiers == 1).sum())
         t1_2   = int((tiers <= 2).sum())
         t3plus = int((tiers >= 3).sum())
 
         mean_d2h       = means.mean()                  if len(means) else np.nan
-        # _runtime_mean = total seconds for the full budget run
-        # per-iteration ms = total / budget * 1000
-        rt_per_iter_ms = (rts / bud * 1000).median()  if len(rts)  else np.nan
+        rt_per_iter_ms = (rts / bud * 1000).median()  if len(rts) and bud else np.nan
         rt_total_s     = rts.median()                  if len(rts)  else np.nan
 
         rows.append({
             'key':            key,
-            'display':        DISPLAY_NAMES.get(key, key),
+            'display':        key,
             'n':              n,
             'tier1':          t1,
             'tier1_pct':      100 * t1     / n if n else np.nan,
@@ -186,9 +169,7 @@ def to_latex_summary(stats: pd.DataFrame) -> str:
     lines = [
         r'\begin{table}[t]',
         r'\centering',
-        (r'\caption{Scott-Knott ranking comparison. Tier 1 = best performance. '
-         r'Note budget imbalance: EZR/SMAC use 200 evaluations, '
-         r'NSGA-II/SPEA2 use 1000.}'),
+        (r'\caption{Scott-Knott ranking comparison. Tier 1 = best performance.}'),
         r'\label{tab:performance}',
         r'\small',
         f'\\begin{{tabular}}{{{col_spec}}}',
@@ -228,12 +209,6 @@ def to_latex_summary(stats: pd.DataFrame) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _wtl(ref_tiers: pd.Series, opp_tiers: pd.Series):
-    """
-    Win  = ref tier LOWER  (better) than opp
-    Tie  = equal tier
-    Lose = ref tier HIGHER (worse)  than opp
-    Only rows where both tiers are non-NaN are counted.
-    """
     valid = ref_tiers.notna() & opp_tiers.notna()
     ref   = ref_tiers[valid].values
     opp   = opp_tiers[valid].values
@@ -244,11 +219,6 @@ def _wtl(ref_tiers: pd.Series, opp_tiers: pd.Series):
 
 
 def advantage(w: int, t: int, l: int) -> str:
-    """
-    EZR is 'good' when W + T >= L.
-    Returns "WT vs L (WT%)" — percentage of datasets where EZR
-    matched or beat the opponent.  >= 50% means reference holds its own.
-    """
     total = w + t + l
     if total == 0:
         return '-'
@@ -257,25 +227,58 @@ def advantage(w: int, t: int, l: int) -> str:
     return f'{wt} vs {l} ({pct:.0f}%)'
 
 
-def build_wtl_table(df: pd.DataFrame) -> pd.DataFrame:
-    # ── Print datasets considered in WTL counting ──────────────────────────
+def build_wtl_sections(keys: list, ref_optimizer: str = None):
+    """
+    Auto-build WTL sections: each unique optimizer at each budget vs all others.
+    If ref_optimizer is specified, only build sections for that optimizer.
+    """
+    # group keys by optimizer name
+    by_opt = {}
+    for k in keys:
+        opt = k.rsplit('-', 1)[0]
+        by_opt.setdefault(opt, []).append(k)
+
+    sections = []
+    optimizers = [ref_optimizer] if ref_optimizer else sorted(by_opt.keys())
+    all_keys_set = set(keys)
+
+    for opt in optimizers:
+        if opt not in by_opt:
+            continue
+        for ref_key in by_opt[opt]:
+            opponents = [k for k in keys if k != ref_key]
+            if opponents:
+                label = f'{ref_key} vs all others'
+                sections.append((label, ref_key, opponents))
+
+    return sections
+
+
+def build_wtl_table(df: pd.DataFrame, wtl_sections: list) -> pd.DataFrame:
+    # print datasets considered
     name_col = None
     for c in df.columns:
-        if c == 'dataset' or (df[c].dtype == object and name_col is None):
+        if c.lower() in ('dataset', 'datasets'):
             name_col = c
             break
-    first_ref_col = f'{WTL_SECTIONS[0][1]}_tier'
-    if name_col and first_ref_col in df.columns:
-        considered = sorted(
-            df.loc[df[first_ref_col].notna(), name_col].dropna().unique().tolist()
-        )
-        print(f'\nDatasets considered in Win/Tie/Lose ({len(considered)} total):')
-        for ds in considered:
-            print(f'  {ds}')
+    if name_col is None:
+        for c in df.columns:
+            if df[c].dtype == object:
+                name_col = c
+                break
 
-    # ── Build rows ─────────────────────────────────────────────────────────
+    if wtl_sections and name_col:
+        first_ref_col = f'{wtl_sections[0][1]}_tier'
+        if first_ref_col in df.columns:
+            considered = sorted(
+                df.loc[df[first_ref_col].notna(), name_col].dropna().unique().tolist()
+            )
+            print(f'\nDatasets considered in Win/Tie/Lose ({len(considered)} total):')
+            for ds in considered:
+                print(f'  {ds}')
+
     rows = []
-    for section_label, ref_key, opponents in WTL_SECTIONS:
+    for section_label, ref_key, opponents in wtl_sections:
         ref_col = f'{ref_key}_tier'
         if ref_col not in df.columns:
             continue
@@ -286,8 +289,8 @@ def build_wtl_table(df: pd.DataFrame) -> pd.DataFrame:
             w, t, l = _wtl(df[ref_col], df[opp_col])
             rows.append({
                 'Section'  : section_label,
-                'Reference': DISPLAY_NAMES.get(ref_key, ref_key),
-                'Opponent' : DISPLAY_NAMES.get(opp_key, opp_key),
+                'Reference': ref_key,
+                'Opponent' : opp_key,
                 'Win'      : w,
                 'Tie'      : t,
                 'Lose'     : l,
@@ -308,11 +311,11 @@ def print_wtl_table(wtl_df: pd.DataFrame):
         if row['Section'] != current:
             current = row['Section']
             print(f'\n── {current} ──')
-            print(f"  {'Reference':<14}  {'Opponent':<14}  "
+            print(f"  {'Reference':<14}  {'Opponent':<16}  "
                   f"{'Win':>5}  {'Tie':>5}  {'Lose':>5}  {'W+T vs L':>18}")
-            print(f"  {'-'*14}  {'-'*14}  "
+            print(f"  {'-'*14}  {'-'*16}  "
                   f"{'-'*5}  {'-'*5}  {'-'*5}  {'-'*18}")
-        print(f"  {row['Reference']:<14}  {row['Opponent']:<14}  "
+        print(f"  {row['Reference']:<14}  {row['Opponent']:<16}  "
               f"{row['Win']:>5}  {row['Tie']:>5}  {row['Lose']:>5}  "
               f"{row['W+T vs L']:>18}")
 
@@ -344,8 +347,8 @@ def to_latex_wtl(wtl_df: pd.DataFrame) -> str:
                 f'\\multicolumn{{6}}{{l}}'
                 f'{{\\textit{{{escaped}}}}} \\\\'
             )
-        ref = row['Reference'].replace('-', r'\nobreakdash-')
-        opp = row['Opponent'].replace('-',  r'\nobreakdash-')
+        ref = str(row['Reference']).replace('-', r'\nobreakdash-')
+        opp = str(row['Opponent']).replace('-',  r'\nobreakdash-')
         lines.append(
             f'{ref} & {opp} & '
             f'{row["Win"]} & {row["Tie"]} & {row["Lose"]} & '
@@ -363,19 +366,26 @@ def to_latex_wtl(wtl_df: pd.DataFrame) -> str:
 def main(csv_path:        str = 'scott_knott_dataset.csv',
          out_summary_csv: str = 'summary_stats.csv',
          out_wtl_csv:     str = 'wtl_table.csv',
-         out_latex:       str = 'tables.tex'):
+         out_latex:       str = 'tables.tex',
+         ref_optimizer:   str = None):
 
     df = load(csv_path)
     print(f'Loaded {len(df)} datasets, {len(df.columns)} columns.')
 
+    keys = infer_keys(df)
+    print(f'Inferred {len(keys)} optimizer-budget keys: {keys}')
+
+    budget_map = build_budget_map(keys)
+
     # ── Summary table ──────────────────────────────────────────────────────
-    stats = summary_stats(df, SUMMARY_KEYS)
+    stats = summary_stats(df, keys, budget_map)
     print_summary_table(stats)
     stats.to_csv(out_summary_csv, index=False)
     print(f'\nSummary stats saved → {out_summary_csv}')
 
     # ── Win / Tie / Lose table ─────────────────────────────────────────────
-    wtl_df = build_wtl_table(df)
+    wtl_sections = build_wtl_sections(keys, ref_optimizer=ref_optimizer)
+    wtl_df = build_wtl_table(df, wtl_sections)
     print_wtl_table(wtl_df)
     wtl_df.to_csv(out_wtl_csv, index=False)
     print(f'Win/Tie/Lose table saved → {out_wtl_csv}')
@@ -395,5 +405,8 @@ if __name__ == '__main__':
     p.add_argument('--out_summary_csv', default='summary_stats.csv')
     p.add_argument('--out_wtl_csv',     default='wtl_table.csv')
     p.add_argument('--out_latex',       default='tables.tex')
+    p.add_argument('--ref_optimizer',   default=None,
+                   help='If set, WTL table only shows sections for this optimizer '
+                        '(e.g. --ref_optimizer EZR). Otherwise all vs all.')
     a = p.parse_args()
-    main(a.csv, a.out_summary_csv, a.out_wtl_csv, a.out_latex)
+    main(a.csv, a.out_summary_csv, a.out_wtl_csv, a.out_latex, a.ref_optimizer)
