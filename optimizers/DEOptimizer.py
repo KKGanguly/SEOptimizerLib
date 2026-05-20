@@ -4,7 +4,6 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from optimizers.base_optimizer import BaseOptimizer
-from models.Data import Data
 from utils import DistanceUtil
 import time
 import random
@@ -14,20 +13,17 @@ import numpy as np
 
 class DEOptimizer(BaseOptimizer):
     """
-    Differential Evolution optimizer over the dataset.
+    Differential Evolution optimizer over the continuous RF surrogate.
 
     Classic DE/rand/1/bin:
-      - Population of `pop_size` real dataset rows (by index)
-      - For each target x_i, pick 3 distinct random individuals a, b, c
-      - Mutant v = snap(a + F * (b - c))  →  nearest dataset row to the
-        perturbed numeric vector
-      - Trial u = crossover(x_i, v) per dimension with probability CR
-      - Replace x_i with u if u is better (d2h)
+      - Population of `pop_size` individuals initialized from dataset.
+      - For each target x_i, pick 3 distinct random individuals a, b, c.
+      - Mutant v = a + F * (b - c) for numeric, bounds-clipped.
+      - Trial u = crossover(x_i, v) per dimension with probability CR.
+      - Replace x_i with u if u is strictly better (d2h).
 
-    Categorical dimensions: crossover only (no arithmetic mutation).
-    Mutation is numeric-only; categorical dims are inherited from 'a'.
-    RF surrogate scores every candidate — no table lookup.
-    KD-tree used only to snap mutant vectors back to real dataset rows.
+    No KD-tree snapping. The optimizer explores the continuous gaps 
+    between dataset rows but respects ConfigSpace bounds.
     """
 
     def __init__(self, config, model_wrapper, model_config, logging_util, seed):
@@ -38,13 +34,7 @@ class DEOptimizer(BaseOptimizer):
 
         self.X_df = self.model_wrapper.X
         self.columns = list(self.X_df.columns)
-        self.n_cols = len(self.columns)
-
-        self.nn = Data(
-            self.X_df.values.tolist(),
-            column_types=self.model_config.column_types,
-        )
-        self.n_rows = len(self.nn.rows)
+        self.n_rows = len(self.X_df)
 
         self.cache = {}
         self.num_objectives = len(
@@ -68,28 +58,31 @@ class DEOptimizer(BaseOptimizer):
         self.cat_cols  = [c for c in self.columns
                           if self.model_config.column_types.get(c) != 'numeric']
 
-        # Build col → position index for fast access
-        self.col_idx = {c: i for i, c in enumerate(self.columns)}
+        # Get bounds for clipping continuous variables
+        self.config_space, _, _ = self.model_config.get_configspace()
+        self.bounds = {}
+        self.is_int = {}
+        for hp in self.config_space.get_hyperparameters():
+            if type(hp).__name__ in ["UniformFloatHyperparameter", "UniformIntegerHyperparameter"]:
+                self.bounds[hp.name] = (hp.lower, hp.upper)
+                self.is_int[hp.name] = (type(hp).__name__ == "UniformIntegerHyperparameter")
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _clean(self, v):
-        return v.item() if hasattr(v, "item") else v
+    def _safe_clean(self, v):
+        """Clean items and round floats slightly to prevent cache bloat."""
+        val = v.item() if hasattr(v, "item") else v
+        return round(val, 6) if isinstance(val, float) else val
 
     def _row_tuple(self, hp_dict):
-        return tuple(hp_dict[c] for c in self.columns)
+        return tuple(self._safe_clean(hp_dict[c]) for c in self.columns)
 
     def _idx_to_config(self, idx):
-        row = self.nn.rows[idx]
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
-
-    def _snap_to_nearest(self, hp_dict):
-        """Snap an arbitrary (possibly synthetic) config to nearest dataset row."""
-        query = [hp_dict[c] for c in self.columns]
-        row = self.nn.nearestRow(query)
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
+        """Initialize from a real dataset row."""
+        row = self.X_df.iloc[idx]
+        return {c: self._safe_clean(row[c]) for c in self.columns}
 
     # ------------------------------------------------------------------
     # Evaluation
@@ -118,28 +111,48 @@ class DEOptimizer(BaseOptimizer):
 
     def _mutate(self, a, b, c):
         """
-        DE/rand/1 mutation.
-        Numeric dims:     v[i] = a[i] + F * (b[i] - c[i])
-        Categorical dims: v[i] = a[i]  (no arithmetic meaning)
-        Then snap the whole vector to the nearest real dataset row.
+        DE/rand/1 mutation with bounds clipping.
         """
         mutant = {}
         for col in self.columns:
             if col in self.num_cols:
                 mutant[col] = self._mutate_numeric(a, b, c, col)
             else:
-                mutant[col] = self._mutate_categorical(a, b, c, col)
+                mutant[col] = self._mutate_categorical(b, c, col)
         return mutant
 
     def _mutate_numeric(self, a, b, c, col):
-        return a[col] + self.F * (b[col] - c[col])
+        # Arithmetic mutation
+        val = a[col] + self.F * (b[col] - c[col])
+        
+        # Clip to valid bounds so surrogate doesn't break
+        if col in self.bounds:
+            lower, upper = self.bounds[col]
+            val = max(lower, min(upper, val))
+            
+        # Enforce integer types
+        if self.is_int.get(col, False):
+            val = int(round(val))
+            
+        return val
 
     def _mutate_categorical(self, a, b, c, col):
-
-        if random.random() >= self.CR:
+        """
+        Simulates: v = a + F * (b - c) for categorical variables.
+        """
+        # If b and c are the same, the 'difference' is 0. 
+        # So v = a + F * (0) -> v = a
+        if b[col] == c[col]:
             return a[col]
-
-        return b[col] if random.random() < self.F else c[col]
+            
+        # If b and c differ, there is a 'difference'. 
+        # We apply this difference to 'a' with probability F.
+        if random.random() < self.F:
+            # The mutation occurs. Pick one of the donor values.
+            return b[col] if random.random() < 0.5 else c[col]
+        else:
+            # The mutation fails to trigger. Stay at a.
+            return a[col]
 
     def _crossover(self, target, mutant):
         """
@@ -147,7 +160,7 @@ class DEOptimizer(BaseOptimizer):
         Each dimension copied from mutant with prob CR.
         At least one dimension guaranteed from mutant (j_rand).
         """
-        j_rand = random.randrange(self.n_cols)
+        j_rand = random.randrange(len(self.columns))
         trial = {}
         for i, col in enumerate(self.columns):
             if i == j_rand or random.random() < self.CR:

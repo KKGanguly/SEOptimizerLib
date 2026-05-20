@@ -4,7 +4,6 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from optimizers.base_optimizer import BaseOptimizer
-from models.Data import Data
 from ConfigSpace.hyperparameters import (
     OrdinalHyperparameter,
     CategoricalHyperparameter,
@@ -19,23 +18,19 @@ import numpy as np
 
 class IteratedLocalSearchOptimizer(BaseOptimizer):
     """
-    Iterated Local Search (ILS) optimizer.
+    Iterated Local Search (ILS) optimizer operating over the continuous Random Forest surrogate.
 
     Classic ILS:
-      1. Start at a random solution
-      2. Apply hill climbing until local optimum
-      3. Perturb the best solution found so far (not the local optimum)
-      4. Repeat from step 2 using the perturbed point as the new start
-      5. Accept new solution if it improves best (or use acceptance criterion)
+      1. Start at a random solution (drawn from the real dataset to ground it).
+      2. Apply hill climbing until local optimum.
+      3. Perturb the best solution found so far (Medium random walk).
+      4. Repeat from step 2 using the perturbed point as the new start.
 
-    Perturbation for discrete data: walk `perturbation_hops` steps away
-    from the best solution using the KD-tree neighbourhood, giving a
-    starting point that is near-but-not-identical to the best basin.
+    Hill climbing inner loop: evaluates `neighbor_size` synthetic continuous 
+    neighbors, moves to best if it strictly improves d2h.
 
-    Hill climbing inner loop: evaluate all `neighbor_size` KD-tree
-    neighbours, move to best if it improves d2h, stop when no improvement.
-
-    Single-objectivisation via d2h.
+    Perturbation: walks `perturbation_hops` steps away using forced continuous 
+    mutation to guarantee it escapes the basin while respecting bounds.
     """
 
     def __init__(self, config, model_wrapper, model_config, logging_util, seed):
@@ -46,14 +41,13 @@ class IteratedLocalSearchOptimizer(BaseOptimizer):
 
         self.X_df = self.model_wrapper.X
         self.columns = list(self.X_df.columns)
-
-        self.nn = Data(
-            self.X_df.values.tolist(),
-            column_types=self.model_config.column_types,
-        )
+        self.n_rows = len(self.X_df)
 
         self.config_space, _, _ = self.model_config.get_configspace()
         self.cache = {}
+
+        assert hasattr(self.model_wrapper, 'rf_model'), \
+            "ModelWrapper must have RF trained before optimizer init"
 
         self.num_objectives = len(
             self.model_wrapper.get_score(
@@ -68,13 +62,7 @@ class IteratedLocalSearchOptimizer(BaseOptimizer):
         # ILS parameters
         self.neighbor_size      = int(self.config.get("neighbor_size", 5))
         self.perturbation_hops  = int(self.config.get("perturbation_hops", 3))
-        self.max_restarts       = int(self.config.get("max_restarts", 10))
-
-        # Row index: tuple(row) → dataset index for KD-tree lookup
-        self.row_to_idx = {
-            tuple(v.item() if hasattr(v, "item") else v for v in row): i
-            for i, row in enumerate(self.nn.rows)
-        }
+        self.mutation_rate      = float(self.config.get("mutation_rate", 0.2))
 
     # ------------------------------------------------------------------
     # Helpers
@@ -83,30 +71,26 @@ class IteratedLocalSearchOptimizer(BaseOptimizer):
     def _clean(self, v):
         return v.item() if hasattr(v, "item") else v
 
-    def _nearest_row(self, hp_dict):
-        query = [hp_dict[c] for c in self.columns]
-        row = self.nn.nearestRow(query)
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
-
     def _row_tuple(self, hp_dict):
-        return tuple(hp_dict[c] for c in self.columns)
-
-    def _config_to_idx(self, hp_dict):
-        return self.row_to_idx.get(self._row_tuple(hp_dict), None)
+        """Round floats slightly to prevent hash misses in cache."""
+        return tuple(
+            round(hp_dict[c], 6) if isinstance(hp_dict[c], float) else hp_dict[c]
+            for c in self.columns
+        )
 
     def _idx_to_config(self, idx):
-        row = self.nn.rows[idx]
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
+        """Extract a real dataset row to use as an initial starting point."""
+        row = self.X_df.iloc[idx]
+        return {c: self._clean(row[c]) for c in self.columns}
 
     def _random_config(self):
-        idx = random.randrange(len(self.nn.rows))
+        idx = random.randrange(self.n_rows)
         return self._idx_to_config(idx)
 
     # ------------------------------------------------------------------
-    # Evaluation with caching and tracking
+    # Evaluation
     # ------------------------------------------------------------------
     def _evaluate(self, hp_dict):
-        """RF surrogate scoring — no table lookup."""
         key = self._row_tuple(hp_dict)
         if key in self.cache:
             scores, d2h_val = self.cache[key]
@@ -124,19 +108,74 @@ class IteratedLocalSearchOptimizer(BaseOptimizer):
         return hp_dict, scores, d2h_val
 
     # ------------------------------------------------------------------
-    # Neighbour generation via KD-tree
+    # Continuous Mutation (Shared logic with Hill Climber)
     # ------------------------------------------------------------------
+    def _mutate(self, config, force_one=False):
+        """
+        Create a neighbor by perturbing hyperparameters. 
+        If force_one=True, guarantees exactly one random parameter mutates 
+        regardless of mutation_rate, while the rest follow probability.
+        """
+        mutant = copy.deepcopy(config)
+        mutated_any = False
+        
+        hps = [hp for hp in self.config_space.get_hyperparameters() if not isinstance(hp, Constant)]
+        if not hps:
+            return mutant
+            
+        # If we must guarantee a change, pick exactly one HP to force
+        forced_hp = random.choice(hps).name if force_one else None
+        
+        for hp in hps:
+            name = hp.name
+            current_val = mutant[name]
+
+            # Skip mutation if it's not the forced HP AND it fails the probability check
+            if name != forced_hp and random.random() > self.mutation_rate:
+                continue
+
+            if type(hp).__name__ in ["UniformFloatHyperparameter", "UniformIntegerHyperparameter"]:
+                span = hp.upper - hp.lower
+                std = span * 0.1 # 10% Gaussian noise
+                new_val = current_val + random.gauss(0, std)
+                
+                # Strict bounds clipping
+                new_val = max(hp.lower, min(hp.upper, new_val))
+                
+                if type(hp).__name__ == "UniformIntegerHyperparameter":
+                    new_val = int(round(new_val))
+                    
+                mutant[name] = new_val
+                mutated_any = True
+
+            elif isinstance(hp, CategoricalHyperparameter):
+                choices = list(hp.choices)
+                if len(choices) > 1:
+                    if current_val in choices:
+                        choices.remove(current_val)
+                    mutant[name] = random.choice(choices)
+                    mutated_any = True
+
+            elif isinstance(hp, OrdinalHyperparameter):
+                seq = list(hp.sequence)
+                if current_val in seq:
+                    idx = seq.index(current_val)
+                    moves = []
+                    if idx > 0: moves.append(idx - 1)
+                    if idx < len(seq) - 1: moves.append(idx + 1)
+                    if moves:
+                        mutant[name] = seq[random.choice(moves)]
+                        mutated_any = True
+                    
+        # If pure probability missed everything, recursively force exactly one to change
+        if not mutated_any and not force_one:
+            return self._mutate(config, force_one=True)
+
+        return mutant
 
     def _get_neighbours(self, current_config):
-        idx = self._config_to_idx(current_config)
-
-        if idx is None:
-            all_indices = list(range(len(self.nn.rows)))
-            sampled = random.sample(all_indices, min(self.neighbor_size, len(all_indices)))
-            return [self._idx_to_config(i) for i in sampled]
-
-        neighbour_indices = self.nn.k_nearest_indices(idx, k=self.neighbor_size)
-        return [self._idx_to_config(i) for i in neighbour_indices]
+        """Generate `neighbor_size` synthetic continuous neighbors."""
+        return [self._mutate(current_config, force_one=False) for _ in range(self.neighbor_size)]
 
     # ------------------------------------------------------------------
     # Perturbation — the ILS-specific step
@@ -144,40 +183,21 @@ class IteratedLocalSearchOptimizer(BaseOptimizer):
 
     def _perturb(self, best_config):
         """
-        Walk `perturbation_hops` random KD-tree steps away from best_config.
-        Each hop picks one random neighbour from the current position,
-        producing a starting point that is near-but-outside the best basin.
-
-        This is the discrete analogue of:
-            start_pt = best + randn(len(bounds)) * p_size
-        from the reference implementation, but respects the actual data
-        geometry instead of assuming a continuous space.
+        Take `perturbation_hops` guaranteed steps away from the global best.
+        force_one=True guarantees it doesn't get stuck generating duplicates.
         """
-        current = best_config
-        visited = {self._row_tuple(current)}
-
+        current = copy.deepcopy(best_config)
         for _ in range(self.perturbation_hops):
-            neighbours = self._get_neighbours(current)
-            # Prefer unvisited neighbours to avoid immediately looping back
-            unvisited = [n for n in neighbours if self._row_tuple(n) not in visited]
-            candidates = unvisited if unvisited else neighbours
-            if not candidates:
-                break
-            current = random.choice(candidates)
-            visited.add(self._row_tuple(current))
-
+            current = self._mutate(current, force_one=True)
         return current
 
     # ------------------------------------------------------------------
-    # Inner hill climbing — runs until local optimum or budget exhausted
+    # Inner hill climbing
     # ------------------------------------------------------------------
 
     def _hill_climb(self, start_config, start_d2h):
         """
         Best-improvement hill climbing from start_config.
-        Evaluates all neighbours, moves to best if it improves d2h.
-        Stops when no neighbour improves (local optimum).
-        Returns the local optimum config and its d2h.
         """
         current_config = start_config
         current_d2h = start_d2h
@@ -221,25 +241,30 @@ class IteratedLocalSearchOptimizer(BaseOptimizer):
         n_trials = self.config["n_trials"]
         self.start_time = time.time()
 
-        # ── Step 1: random initial solution ────────────────────────────
+        # ── Step 1: Initial solution from dataset ────────────────────
         current_config = self._random_config()
         current_config, _, current_d2h = self._evaluate(current_config)
-
-        # ── Step 2: first hill climb ────────────────────────────────────
+        
+        # ── Step 2: First hill climb ─────────────────────────────────
         current_config, current_d2h = self._hill_climb(current_config, current_d2h)
 
         self.best_value = current_d2h
         self.best_config = copy.deepcopy(current_config)
 
-        # ── Step 3: ILS restarts ────────────────────────────────────────
-        for _ in range(self.max_restarts):
-            if self.iteration >= n_trials:
-                break
-
-            # Perturb the BEST solution found so far (not the local optimum)
-            # This is the defining characteristic of ILS vs random restarts
+        # ── Step 3: ILS loop (Perturb -> Climb) ──────────────────────
+        while self.iteration < n_trials:
+            
+            # Perturb the BEST solution found so far
             perturbed = self._perturb(self.best_config)
-            perturbed, _, perturbed_d2h = self._evaluate(perturbed)
+            
+            # Evaluate the perturbed start point
+            key = self._row_tuple(perturbed)
+            if key in self.cache:
+                scores, perturbed_d2h = self.cache[key]
+                self.iteration += 1
+                self.track_evaluation(perturbed, list(scores), self.iteration)
+            else:
+                perturbed, _, perturbed_d2h = self._evaluate(perturbed)
 
             # Hill climb from the perturbed point
             candidate_config, candidate_d2h = self._hill_climb(perturbed, perturbed_d2h)

@@ -4,7 +4,6 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from optimizers.base_optimizer import BaseOptimizer
-from models.Data import Data
 from utils import DistanceUtil
 import time
 import random
@@ -14,23 +13,20 @@ import numpy as np
 
 class GAOptimizer(BaseOptimizer):
     """
-    Genetic Algorithm optimizer over the dataset.
+    Genetic Algorithm optimizer over the continuous RF surrogate.
 
     Standard generational GA:
-      - Population of `pop_size` real dataset rows
-      - Selection:   tournament selection (size `tournament_k`)
-      - Crossover:   uniform crossover per dimension with prob 0.5
-        (no snap needed — both parents are valid dataset rows,
-         crossover always produces a valid row too because every
-         value per column comes from a real row)
-      - Mutation:    each dimension flips to a random dataset value
-        with probability `mutation_rate`; numeric dims get Gaussian
-        perturbation then snap; categorical dims resample uniformly
-      - Elitism:     top `elitism` individuals survive unchanged
-      - Replacement: full generational replacement with elites carried over
+      - Population of `pop_size` initialized from real dataset rows.
+      - Selection:   tournament selection (size `tournament_k`).
+      - Crossover:   uniform crossover per dimension with prob 0.5.
+      - Mutation:    each dimension mutates with probability `mutation_rate`.
+                     Numeric: Gaussian perturbation clipped to ConfigSpace bounds.
+                     Categorical: uniform resample from ConfigSpace choices.
+      - Elitism:     top `elitism` individuals survive unchanged.
+      - Replacement: full generational replacement.
 
-    RF surrogate scores all individuals — no table lookup.
-    KD-tree used only to snap mutated numeric vectors to nearest dataset rows.
+    No KD-tree snapping. Operates on the continuous space but rigorously 
+    enforces hyperparameter bounds.
     """
 
     def __init__(self, config, model_wrapper, model_config, logging_util, seed):
@@ -41,12 +37,7 @@ class GAOptimizer(BaseOptimizer):
 
         self.X_df = self.model_wrapper.X
         self.columns = list(self.X_df.columns)
-
-        self.nn = Data(
-            self.X_df.values.tolist(),
-            column_types=self.model_config.column_types,
-        )
-        self.n_rows = len(self.nn.rows)
+        self.n_rows = len(self.X_df)
 
         self.cache = {}
         self.num_objectives = len(
@@ -72,36 +63,38 @@ class GAOptimizer(BaseOptimizer):
         self.cat_cols = [c for c in self.columns
                          if self.model_config.column_types.get(c) != 'numeric']
 
-        # Pre-collect unique values per categorical column for mutation
-        self.cat_values = {
-            c: list(self.X_df[c].unique()) for c in self.cat_cols
-        }
-
-        # Numeric range per column for sigma scaling
-        self.num_range = {}
-        for c in self.num_cols:
-            col_data = self.X_df[c].astype(float)
-            r = col_data.max() - col_data.min()
-            self.num_range[c] = r if r > 0 else 1.0
+        # Extract bounds and choices from ConfigSpace for safe continuous mutation
+        self.config_space, _, _ = self.model_config.get_configspace()
+        self.bounds = {}
+        self.is_int = {}
+        self.cat_choices = {}
+        
+        for hp in self.config_space.get_hyperparameters():
+            name = hp.name
+            hp_type = type(hp).__name__
+            
+            if hp_type in ["UniformFloatHyperparameter", "UniformIntegerHyperparameter"]:
+                self.bounds[name] = (hp.lower, hp.upper)
+                self.is_int[name] = (hp_type == "UniformIntegerHyperparameter")
+            elif hp_type in ["CategoricalHyperparameter", "OrdinalHyperparameter"]:
+                self.cat_choices[name] = list(hp.choices) if hasattr(hp, 'choices') else list(hp.sequence)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _clean(self, v):
-        return v.item() if hasattr(v, "item") else v
+    def _safe_clean(self, v):
+        """Clean items and round floats slightly to prevent cache bloat."""
+        val = v.item() if hasattr(v, "item") else v
+        return round(val, 6) if isinstance(val, float) else val
 
     def _row_tuple(self, hp_dict):
-        return tuple(hp_dict[c] for c in self.columns)
+        return tuple(self._safe_clean(hp_dict[c]) for c in self.columns)
 
     def _idx_to_config(self, idx):
-        row = self.nn.rows[idx]
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
-
-    def _snap_to_nearest(self, hp_dict):
-        query = [hp_dict[c] for c in self.columns]
-        row = self.nn.nearestRow(query)
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
+        """Initialize from a real dataset row."""
+        row = self.X_df.iloc[idx]
+        return {c: self._safe_clean(row[c]) for c in self.columns}
 
     # ------------------------------------------------------------------
     # Evaluation
@@ -152,8 +145,6 @@ class GAOptimizer(BaseOptimizer):
     def _crossover(self, parent_a, parent_b):
         """
         Uniform crossover: each dimension independently from parent_a or parent_b.
-        Both parents are valid dataset rows so offspring values are always valid.
-        No snap needed.
         """
         child = {}
         for col in self.columns:
@@ -163,22 +154,38 @@ class GAOptimizer(BaseOptimizer):
     def _mutate(self, individual):
         """
         Per-dimension mutation with probability mutation_rate.
-        Numeric: Gaussian perturbation then snap.
-        Categorical: uniform resample from seen values.
-        Snap is applied once at the end if any numeric dim was mutated.
+        Numeric: Gaussian perturbation constrained by ConfigSpace bounds.
+        Categorical: Uniform resample from ConfigSpace choices.
         """
         mutant = dict(individual)
 
-        for c in self.num_cols:
+        for col in self.columns:
             if random.random() < self.mutation_rate:
-                mutant[c] = float(individual[c]) + np.random.normal(
-                    0.0, self.sigma * self.num_range[c]
-                )
+                
+                if col in self.num_cols and col in self.bounds:
+                    lower, upper = self.bounds[col]
+                    span = upper - lower
+                    
+                    # Add Gaussian noise scaled to the parameter's range
+                    new_val = float(individual[col]) + np.random.normal(0.0, self.sigma * span)
+                    
+                    # Clip to bounds
+                    new_val = max(lower, min(upper, new_val))
+                    
+                    # Enforce integer constraints
+                    if self.is_int.get(col, False):
+                        new_val = int(round(new_val))
+                        
+                    mutant[col] = new_val
 
-        for c in self.cat_cols:
-            if random.random() < self.mutation_rate:
-                mutant[c] = random.choice(self.cat_values[c])
-
+                elif col in self.cat_cols and col in self.cat_choices:
+                    choices = list(self.cat_choices[col])
+                    current_val = mutant[col]
+                    
+                    if len(choices) > 1:
+                        if current_val in choices:
+                            choices.remove(current_val)
+                        mutant[col] = random.choice(choices)
 
         return mutant
 

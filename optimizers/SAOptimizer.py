@@ -4,7 +4,6 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from optimizers.base_optimizer import BaseOptimizer
-from models.Data import Data
 from ConfigSpace.hyperparameters import (
     OrdinalHyperparameter,
     CategoricalHyperparameter,
@@ -20,18 +19,18 @@ import numpy as np
 
 class SimulatedAnnealingOptimizer(BaseOptimizer):
     """
-    Simulated Annealing optimizer.
+    Simulated Annealing optimizer over the continuous RF surrogate.
 
     Classic SA:
-      - Start at a random solution
-      - At each step, pick ONE random neighbour
-      - If it improves d2h, always accept
-      - If it worsens d2h, accept with probability exp(-delta / T)
-      - Cool temperature by factor `cooling_rate` each step
-      - Stop when budget exhausted or T < min_temp
+      - Start at a random solution (from dataset).
+      - At each step, generate ONE continuous neighbour (via mutation).
+      - If it strictly improves d2h, always accept.
+      - If it worsens d2h, accept with probability exp(-delta / T).
+      - Cool temperature by factor `cooling_rate` each step.
+      - Stop when budget exhausted or T < min_temp.
 
-    Neighbours are real dataset rows via KD-tree (Data.k_nearest_indices).
-    Single-objectivisation via d2h.
+    No KD-tree snapping. Operates on the continuous space but rigorously 
+    enforces hyperparameter bounds via ConfigSpace.
     """
 
     def __init__(self, config, model_wrapper, model_config, logging_util, seed):
@@ -42,14 +41,13 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
 
         self.X_df = self.model_wrapper.X
         self.columns = list(self.X_df.columns)
-
-        self.nn = Data(
-            self.X_df.values.tolist(),
-            column_types=self.model_config.column_types,
-        )
+        self.n_rows = len(self.X_df)
 
         self.config_space, _, _ = self.model_config.get_configspace()
         self.cache = {}
+
+        assert hasattr(self.model_wrapper, 'rf_model'), \
+            "ModelWrapper must have RF trained before optimizer init"
 
         self.num_objectives = len(
             self.model_wrapper.get_score(
@@ -62,50 +60,53 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
         self.best_value = float("inf")
 
         # SA parameters
-        self.neighbor_size = int(self.config.get("neighbor_size", 5))
         self.initial_temp  = float(self.config.get("initial_temp", 1.0))
         self.cooling_rate  = float(self.config.get("cooling_rate", 0.95))
         self.min_temp      = float(self.config.get("min_temp", 1e-5))
+        self.mutation_rate = float(self.config.get("mutation_rate", 0.2))
 
-        # Row index: tuple(row) → dataset index for KD-tree lookup
-        self.row_to_idx = {
-            tuple(v.item() if hasattr(v, "item") else v for v in row): i
-            for i, row in enumerate(self.nn.rows)
-        }
+        # Extract bounds and choices from ConfigSpace for safe continuous mutation
+        self.bounds = {}
+        self.is_int = {}
+        self.cat_choices = {}
+        
+        for hp in self.config_space.get_hyperparameters():
+            name = hp.name
+            hp_type = type(hp).__name__
+            
+            if hp_type in ["UniformFloatHyperparameter", "UniformIntegerHyperparameter"]:
+                self.bounds[name] = (hp.lower, hp.upper)
+                self.is_int[name] = (hp_type == "UniformIntegerHyperparameter")
+            elif hp_type in ["CategoricalHyperparameter", "OrdinalHyperparameter"]:
+                self.cat_choices[name] = list(hp.choices) if hasattr(hp, 'choices') else list(hp.sequence)
+
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _clean(self, v):
-        return v.item() if hasattr(v, "item") else v
-
-    def _nearest_row(self, hp_dict):
-        query = [hp_dict[c] for c in self.columns]
-        row = self.nn.nearestRow(query)
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
+    def _safe_clean(self, v):
+        """Clean items and round floats slightly to prevent cache bloat."""
+        val = v.item() if hasattr(v, "item") else v
+        return round(val, 6) if isinstance(val, float) else val
 
     def _row_tuple(self, hp_dict):
-        return tuple(hp_dict[c] for c in self.columns)
-
-    def _config_to_idx(self, hp_dict):
-        return self.row_to_idx.get(self._row_tuple(hp_dict), None)
+        return tuple(self._safe_clean(hp_dict[c]) for c in self.columns)
 
     def _idx_to_config(self, idx):
-        row = self.nn.rows[idx]
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
+        """Initialize from a real dataset row."""
+        row = self.X_df.iloc[idx]
+        return {c: self._safe_clean(row[c]) for c in self.columns}
 
     def _random_config(self):
         """Pick a uniformly random row from the dataset as starting point."""
-        idx = random.randrange(len(self.nn.rows))
-        return self._idx_to_config(idx)
+        return self._idx_to_config(random.randrange(self.n_rows))
 
     # ------------------------------------------------------------------
     # Evaluation with caching and tracking
     # ------------------------------------------------------------------
 
     def _evaluate(self, hp_dict):
-        """RF surrogate scoring — no table lookup."""
         key = self._row_tuple(hp_dict)
         if key in self.cache:
             scores, d2h_val = self.cache[key]
@@ -123,22 +124,59 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
         return hp_dict, scores, d2h_val
 
     # ------------------------------------------------------------------
-    # Neighbour generation via KD-tree
+    # Continuous Mutation
     # ------------------------------------------------------------------
 
-    def _random_neighbour(self, current_config):
+    def _mutate(self, config, force_one=False):
         """
-        Pick ONE random neighbour from the k nearest dataset rows.
-        SA moves one step at a time — we do not evaluate all neighbours.
+        Create a neighbor by perturbing hyperparameters. 
+        Matches the mutation logic from Hill Climbing and ILS exactly.
         """
-        idx = self._config_to_idx(current_config)
+        mutant = copy.deepcopy(config)
+        mutated_any = False
+        
+        hps = [hp for hp in self.config_space.get_hyperparameters() if not isinstance(hp, Constant)]
+        if not hps:
+            return mutant
+            
+        forced_hp = random.choice(hps).name if force_one else None
+        
+        for hp in hps:
+            name = hp.name
+            current_val = mutant[name]
 
-        if idx is None:
-            return self._random_config()
+            if name != forced_hp and random.random() > self.mutation_rate:
+                continue
 
-        neighbour_indices = self.nn.k_nearest_indices(idx, k=self.neighbor_size)
-        chosen_idx = random.choice(neighbour_indices)
-        return self._idx_to_config(chosen_idx)
+            if name in self.bounds:
+                lower, upper = self.bounds[name]
+                span = upper - lower
+                std = span * 0.1 # 10% Gaussian noise
+                new_val = current_val + random.gauss(0, std)
+                
+                # Bounds clipping
+                new_val = max(lower, min(upper, new_val))
+                
+                # Integer enforcing
+                if self.is_int.get(name, False):
+                    new_val = int(round(new_val))
+                    
+                mutant[name] = new_val
+                mutated_any = True
+
+            elif name in self.cat_choices:
+                choices = list(self.cat_choices[name])
+                if len(choices) > 1:
+                    if current_val in choices:
+                        choices.remove(current_val)
+                    mutant[name] = random.choice(choices)
+                    mutated_any = True
+                    
+        # Recursively force a mutation if pure probability missed everything
+        if not mutated_any and not force_one:
+            return self._mutate(config, force_one=True)
+
+        return mutant
 
     # ------------------------------------------------------------------
     # Metropolis acceptance criterion
@@ -172,10 +210,11 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
         # ── SA loop ─────────────────────────────────────────────────────
         while self.iteration < n_trials and temperature > self.min_temp:
 
-            # 1. Pick ONE random neighbour
-            candidate = self._random_neighbour(current_config)
+            # 1. Generate ONE continuous neighbour via mutation
+            candidate = self._mutate(current_config)
 
             # 2. Evaluate it
+            # Cache handled implicitly in _evaluate
             candidate, scores, candidate_d2h = self._evaluate(candidate)
 
             # 3. Metropolis acceptance
@@ -190,7 +229,6 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
 
             # 5. Cool down
             temperature *= self.cooling_rate
-
 
         self.end_time = time.time()
         return self.best_config, self.best_value

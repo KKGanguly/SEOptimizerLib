@@ -4,7 +4,6 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from optimizers.base_optimizer import BaseOptimizer
-from models.Data import Data
 from utils import DistanceUtil
 import time
 import random
@@ -14,22 +13,22 @@ import numpy as np
 
 class OnePlusOneESOptimizer(BaseOptimizer):
     """
-    (1+1) Evolution Strategy optimizer over the dataset.
+    (1+1) Evolution Strategy optimizer over the continuous RF surrogate.
 
     Classic (1+1)-ES:
-      - Single parent config (a real dataset row)
+      - Single parent config (initialized from dataset)
       - Each generation: mutate parent → offspring
       - Keep offspring if it is at least as good (d2h ≤ parent)
       - Mutation:
-          Numeric dims:   Gaussian perturbation scaled by sigma, then snap
-          Categorical dims: uniform resample from all values seen in dataset
+          Numeric: Gaussian perturbation scaled by sigma * bounds_span, then clipped.
+          Categorical: uniform resample from ConfigSpace choices.
       - 1/5 success rule: adapt sigma every `adapt_every` steps
           more than 1/5 successes → sigma *= 1.22  (increase step size)
           fewer than 1/5 successes → sigma *= 0.82  (decrease step size)
-      - Restart from random row when stuck for `patience` steps
+      - Restart from random dataset row when stuck for `patience` steps
 
-    RF surrogate scores every candidate — no table lookup.
-    KD-tree used only to snap mutated numeric vectors to real dataset rows.
+    No KD-tree snapping. Operates on the continuous space but rigorously 
+    enforces hyperparameter bounds.
     """
 
     def __init__(self, config, model_wrapper, model_config, logging_util, seed):
@@ -40,12 +39,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
 
         self.X_df = self.model_wrapper.X
         self.columns = list(self.X_df.columns)
-
-        self.nn = Data(
-            self.X_df.values.tolist(),
-            column_types=self.model_config.column_types,
-        )
-        self.n_rows = len(self.nn.rows)
+        self.n_rows = len(self.X_df)
 
         self.cache = {}
         self.num_objectives = len(
@@ -59,7 +53,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
         self.best_value = float("inf")
 
         # ES parameters
-        self.sigma       = float(self.config.get("sigma", 0.1))      # initial step size
+        self.sigma       = float(self.config.get("sigma", 0.1))       # initial step size
         self.patience    = int(self.config.get("patience", 20))       # steps before restart
         self.adapt_every = int(self.config.get("adapt_every", 10))    # 1/5 rule window
 
@@ -69,39 +63,40 @@ class OnePlusOneESOptimizer(BaseOptimizer):
         self.cat_cols = [c for c in self.columns
                          if self.model_config.column_types.get(c) != 'numeric']
 
-        # Pre-collect unique values per categorical column for mutation
-        self.cat_values = {
-            c: list(self.X_df[c].unique()) for c in self.cat_cols
-        }
-
-        # Numeric range per column for sigma scaling
-        self.num_range = {}
-        for c in self.num_cols:
-            col_data = self.X_df[c].astype(float)
-            r = col_data.max() - col_data.min()
-            self.num_range[c] = r if r > 0 else 1.0
+        # Extract bounds and choices from ConfigSpace for safe continuous mutation
+        self.config_space, _, _ = self.model_config.get_configspace()
+        self.bounds = {}
+        self.is_int = {}
+        self.cat_choices = {}
+        
+        for hp in self.config_space.get_hyperparameters():
+            name = hp.name
+            hp_type = type(hp).__name__
+            
+            if hp_type in ["UniformFloatHyperparameter", "UniformIntegerHyperparameter"]:
+                self.bounds[name] = (hp.lower, hp.upper)
+                self.is_int[name] = (hp_type == "UniformIntegerHyperparameter")
+            elif hp_type in ["CategoricalHyperparameter", "OrdinalHyperparameter"]:
+                self.cat_choices[name] = list(hp.choices) if hasattr(hp, 'choices') else list(hp.sequence)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _clean(self, v):
-        return v.item() if hasattr(v, "item") else v
+    def _safe_clean(self, v):
+        """Clean items and round floats slightly to prevent cache bloat."""
+        val = v.item() if hasattr(v, "item") else v
+        return round(val, 6) if isinstance(val, float) else val
 
     def _row_tuple(self, hp_dict):
-        return tuple(hp_dict[c] for c in self.columns)
+        return tuple(self._safe_clean(hp_dict[c]) for c in self.columns)
 
     def _idx_to_config(self, idx):
-        row = self.nn.rows[idx]
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
+        row = self.X_df.iloc[idx]
+        return {c: self._safe_clean(row[c]) for c in self.columns}
 
     def _random_config(self):
         return self._idx_to_config(random.randrange(self.n_rows))
-
-    def _snap_to_nearest(self, hp_dict):
-        query = [hp_dict[c] for c in self.columns]
-        row = self.nn.nearestRow(query)
-        return {c: self._clean(v) for c, v in zip(self.columns, row)}
 
     # ------------------------------------------------------------------
     # Evaluation
@@ -130,23 +125,40 @@ class OnePlusOneESOptimizer(BaseOptimizer):
 
     def _mutate(self, parent):
         """
-        Gaussian mutation on numeric dims (scaled by sigma * range).
+        Gaussian mutation on numeric dims (scaled by sigma * bounds_span), then clipped.
         Uniform resample on categorical dims with prob 1/n_cat_cols.
-        Then snap full config to nearest dataset row.
         """
         offspring = dict(parent)
 
-        # Numeric: Gaussian perturbation
+        # Numeric: Gaussian perturbation safely bounded
         for c in self.num_cols:
-            offspring[c] = float(parent[c]) + np.random.normal(
-                0.0, self.sigma * self.num_range[c]
-            )
+            if c in self.bounds:
+                lower, upper = self.bounds[c]
+                span = upper - lower
+                
+                # Perturb
+                val = float(parent[c]) + np.random.normal(0.0, self.sigma * span)
+                
+                # Clip to bounds
+                val = max(lower, min(upper, val))
+                
+                # Enforce integers
+                if self.is_int.get(c, False):
+                    val = int(round(val))
+                    
+                offspring[c] = val
 
         # Categorical: each dim flips independently with low prob
         n_cat = max(len(self.cat_cols), 1)
         for c in self.cat_cols:
             if random.random() < 1.0 / n_cat:
-                offspring[c] = random.choice(self.cat_values[c])
+                if c in self.cat_choices:
+                    choices = list(self.cat_choices[c])
+                    current_val = offspring[c]
+                    if len(choices) > 1:
+                        if current_val in choices:
+                            choices.remove(current_val)
+                        offspring[c] = random.choice(choices)
 
         return offspring
 
@@ -197,6 +209,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
                     self.sigma *= 1.22
                 else:
                     self.sigma *= 0.82
+                # Keep sigma within a sane range (e.g. 0.01% to 100% of domain)
                 self.sigma = max(1e-4, min(self.sigma, 1.0))
                 window_successes = 0
                 window_total     = 0

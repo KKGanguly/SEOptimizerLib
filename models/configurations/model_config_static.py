@@ -3,10 +3,13 @@ from datetime import datetime
 from ConfigSpace.hyperparameters import (
     OrdinalHyperparameter,
     CategoricalHyperparameter,
+    UniformFloatHyperparameter,
+    UniformIntegerHyperparameter,
     Constant
 )
 from ConfigSpace import ConfigurationSpace
 from utils.EncodingUtils import EncodingUtils
+
 class ModelConfigurationStatic:
     def __init__(self, config, dataset_file, seed=42, column_types=None):
         self.config = config
@@ -33,27 +36,39 @@ class ModelConfigurationStatic:
     
     def get_hyperconfig_distribution(self):
         """
-        Build a purely discrete ConfigSpace:
-        - numeric -> ordinal via CategoricalHyperparameter with sorted numeric choices
-        - date & categorical -> CategoricalHyperparameter with string choices
+        Build a ConfigSpace that correctly distinguishes between continuous numeric 
+        variables and discrete categoricals.
         """
         cs = ConfigurationSpace(seed=self.seed)
 
         for param_name, values in self.config.items():
-            # values are already ENCODED
             col_type = self.column_types.get(param_name, "categorical")
-            unique_vals = sorted(set(values))
+            
+            # Clean out any potential NaNs from unique values before processing
+            unique_vals = sorted(set(v for v in values if v is not None and str(v).lower() != 'nan'))
 
             if len(unique_vals) == 1:
                 # Constant hyperparameter
                 cs.add_hyperparameter(Constant(param_name, unique_vals[0]))
                 continue
 
-            # Numeric -> ordinal (discrete)
             if col_type == "numeric":
-                hp = OrdinalHyperparameter(param_name, sequence=unique_vals)
+                # Get the true continuous boundaries of the dataset
+                min_val = min(unique_vals)
+                max_val = max(unique_vals)
+                
+                # Determine if this column is purely integers or if it has floats
+                is_integer = all(
+                    isinstance(v, int) or (isinstance(v, float) and v.is_integer()) 
+                    for v in unique_vals
+                )
+                
+                if is_integer:
+                    hp = UniformIntegerHyperparameter(param_name, lower=int(min_val), upper=int(max_val))
+                else:
+                    hp = UniformFloatHyperparameter(param_name, lower=float(min_val), upper=float(max_val))
             else:
-                # date or categorical: treat as categorical
+                # Date or categorical: remains purely discrete
                 hp = CategoricalHyperparameter(param_name, choices=unique_vals)
 
             cs.add_hyperparameter(hp)
@@ -65,7 +80,7 @@ class ModelConfigurationStatic:
             self.configspace = self.get_hyperconfig_distribution()
             self.param_names = list(self.config.keys())
             self.hyperparam_space = [[value for value in config_values] for config_values in self.config.values()]
-            param_values = {param: [] for param in  self.param_names}
+            param_values = {param: [] for param in self.param_names}
             for index, param_set in enumerate(self.hyperparam_space):
                 param_values[self.param_names[index]].extend(param_set)
             self.hyperparam_dict = param_values
