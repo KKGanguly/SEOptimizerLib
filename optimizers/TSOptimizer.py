@@ -122,10 +122,12 @@ class TabuSearchOptimizer(BaseOptimizer):
         else:
             try:
                 scores = tuple(self.model_wrapper.get_score(hp_dict))
-            except Exception:
-                scores = tuple(1.0 for _ in range(self.num_objectives))
-            ideal = [0] * self.num_objectives
-            d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                ideal = [0] * self.num_objectives
+                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+            except Exception as e:
+                # Mathematical infinity ensures this configuration is never selected
+                scores = tuple(float('inf') for _ in range(self.num_objectives))
+                d2h_val = float('inf')
             self.cache[key] = (scores, d2h_val)
 
         self.iteration += 1
@@ -160,8 +162,12 @@ class TabuSearchOptimizer(BaseOptimizer):
             if name in self.bounds:
                 lower, upper = self.bounds[name]
                 span = upper - lower
-                std = span * 0.1 # 10% Gaussian noise
-                new_val = current_val + random.gauss(0, std)
+                if span <= 1.0:
+                    # Uniformly resample across the entire bound to guarantee a chance to flip
+                    new_val = random.uniform(hp.lower, hp.upper)
+                else:
+                    std = span * 0.1 # 10% Gaussian noise
+                    new_val = current_val + random.gauss(0, std)
                 
                 # Bounds clipping
                 new_val = max(lower, min(upper, new_val))

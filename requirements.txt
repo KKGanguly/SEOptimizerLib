@@ -12,3 +12,5 @@ optunahub
 hebo
 numba
 scikit-learn
+causal-learn
+lingam

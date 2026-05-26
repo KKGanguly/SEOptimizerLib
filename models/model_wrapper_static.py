@@ -16,7 +16,6 @@ class ModelWrapperStatic:
         self.model_config = model_config
         self.column_types = model_config.column_types
         self.seed = seed
-        #this is not used, but if used, then need to encode with the new cat encoder
         self.X = X  # already encoded by experiment runner
  
         # ------------------------------------------------------------------

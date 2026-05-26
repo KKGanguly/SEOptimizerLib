@@ -85,7 +85,8 @@ def get_optimizer_dir(results_dir: Path, optimizer_name: str) -> Path:
         'HILL': 'HILL',
         'RandomSearch': 'RandomSearch',
         'EZR': 'EZR',
-        'DE' : 'DE'
+        'DE' : 'DE',
+        'SA' : 'SA'
     }
 
     folder_name = folder_map.get(optimizer_name.split('-')[0], optimizer_name.lower())

@@ -34,10 +34,12 @@ def write_json_to_file(filepath, data):
 def init_optimizer(optimizer_name, optimizer_config, model_wrapper, model_config, seed):
     """Initialize optimizer by name"""
     optimizer_classes = {
-        'MOSMAC': MOSMACOptimizer,
+        'SMAC': SMACOptimizer,
         'RandomSearch': RandomSearchOptimizer,
         'NSGA2': NSGA2Optimizer,
         'SPEA2': SPEA2Optimizer,
+        'MOEAD' : MOEADOptimizer,
+        'SMSEMOA' : SMSEMOAOptimizer,
         'EZR': EZROptimizer, 
         'HILL' : HillClimbingOptimizer,
         'SA' : SimulatedAnnealingOptimizer,
@@ -48,7 +50,12 @@ def init_optimizer(optimizer_name, optimizer_config, model_wrapper, model_config
         'HEBO' : HEBOOptimizer, 
         'DE' : DEOptimizer,
         'GA' : GAOptimizer,
-        'ONEPLUSONE' : OnePlusOneESOptimizer
+        'ONEPLUSONE' : OnePlusOneESOptimizer,
+        'EDA' : EDAOptimizer,
+        'PSO' : PSOOptimizer,
+        'PTUNE' : PromiseTuneOptimizer,
+        'SWAY' : SWAYOptimizer,
+        'DODGE' : DODGEOptimizer
     }
     
     if optimizer_name not in optimizer_classes:

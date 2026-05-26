@@ -62,7 +62,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
                          if self.model_config.column_types.get(c) == 'numeric']
         self.cat_cols = [c for c in self.columns
                          if self.model_config.column_types.get(c) != 'numeric']
-
+        
         # Extract bounds and choices from ConfigSpace for safe continuous mutation
         self.config_space, _, _ = self.model_config.get_configspace()
         self.bounds = {}
@@ -109,10 +109,12 @@ class OnePlusOneESOptimizer(BaseOptimizer):
         else:
             try:
                 scores = tuple(self.model_wrapper.get_score(hp_dict))
-            except Exception:
-                scores = tuple(1.0 for _ in range(self.num_objectives))
-            ideal = [0] * self.num_objectives
-            d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                ideal = [0] * self.num_objectives
+                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+            except Exception as e:
+                # Mathematical infinity ensures this configuration is never selected
+                scores = tuple(float('inf') for _ in range(self.num_objectives))
+                d2h_val = float('inf')
             self.cache[key] = (scores, d2h_val)
 
         self.iteration += 1
@@ -135,9 +137,12 @@ class OnePlusOneESOptimizer(BaseOptimizer):
             if c in self.bounds:
                 lower, upper = self.bounds[c]
                 span = upper - lower
-                
-                # Perturb
-                val = float(parent[c]) + np.random.normal(0.0, self.sigma * span)
+                if span <= 1.0:
+                    # Uniformly resample across the entire bound to guarantee a chance to flip
+                    val = random.uniform(hp.lower, hp.upper)
+                else:
+                    # Perturb
+                    val = float(parent[c]) + np.random.normal(0.0, self.sigma * span)
                 
                 # Clip to bounds
                 val = max(lower, min(upper, val))
@@ -205,10 +210,11 @@ class OnePlusOneESOptimizer(BaseOptimizer):
             # 1/5 success rule — adapt sigma every adapt_every steps
             if window_total >= self.adapt_every:
                 rate = window_successes / window_total
+                # Hans-Paul Schwefel's suggestion
                 if rate > 0.2:
-                    self.sigma *= 1.22
+                    self.sigma *= 1.176
                 else:
-                    self.sigma *= 0.82
+                    self.sigma *= 0.85
                 # Keep sigma within a sane range (e.g. 0.01% to 100% of domain)
                 self.sigma = max(1e-4, min(self.sigma, 1.0))
                 window_successes = 0

@@ -59,7 +59,7 @@ class HillClimbingOptimizer(BaseOptimizer):
 
         # Hill climbing parameters
         self.neighbor_size = int(self.config.get("neighbor_size", 5))
-        self.mutation_rate = float(self.config.get("mutation_rate", 0.2))
+        self.mutation_rate = float(self.config.get("mutation_rate", 0.1))
 
     # ------------------------------------------------------------------
     # Helpers
@@ -90,10 +90,13 @@ class HillClimbingOptimizer(BaseOptimizer):
         else:
             try:
                 scores = tuple(self.model_wrapper.get_score(hp_dict))
+                ideal = [0] * self.num_objectives
+                d2h_val = DistanceUtil.d2h(ideal, list(scores))
             except Exception:
-                scores = tuple(1.0 for _ in range(self.num_objectives))
-            ideal = [0] * self.num_objectives
-            d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                #scores = tuple(1.0 for _ in range(self.num_objectives))
+                scores = tuple(float('inf') for _ in range(self.num_objectives))
+                d2h_val = float('inf')
+            
             self.cache[key] = (scores, d2h_val)
 
         self.iteration += 1
@@ -121,8 +124,13 @@ class HillClimbingOptimizer(BaseOptimizer):
             if type(hp).__name__ in ["UniformFloatHyperparameter", "UniformIntegerHyperparameter"]:
                 # Gaussian noise (10% of the range)
                 span = hp.upper - hp.lower
-                std = span * 0.1
-                new_val = current_val + random.gauss(0, std)
+                if span <= 1.0:
+                    # Uniformly resample across the entire bound to guarantee a chance to flip
+                    new_val = random.uniform(hp.lower, hp.upper)
+                else:
+                    # Standard Gaussian noise (10% of the range)
+                    std = span * 0.1
+                    new_val = current_val + random.gauss(0, std)
                 
                 # Clip to bounds
                 new_val = max(hp.lower, min(hp.upper, new_val))

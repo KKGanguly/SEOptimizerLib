@@ -95,10 +95,12 @@ class DEOptimizer(BaseOptimizer):
         else:
             try:
                 scores = tuple(self.model_wrapper.get_score(hp_dict))
-            except Exception:
-                scores = tuple(1.0 for _ in range(self.num_objectives))
-            ideal = [0] * self.num_objectives
-            d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                ideal = [0] * self.num_objectives
+                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+            except Exception as e:
+                # Mathematical infinity ensures this configuration is never selected
+                scores = tuple(float('inf') for _ in range(self.num_objectives))
+                d2h_val = float('inf')
             self.cache[key] = (scores, d2h_val)
 
         self.iteration += 1
@@ -121,6 +123,15 @@ class DEOptimizer(BaseOptimizer):
                 mutant[col] = self._mutate_categorical(b, c, col)
         return mutant
 
+    def _clamp(self, hp_dict):
+            """Helper to enforce bounds after any operation."""
+            for col, (lower, upper) in self.bounds.items():
+                if col in hp_dict:
+                    val = max(lower, min(upper, hp_dict[col]))
+                    if self.is_int.get(col, False):
+                        val = int(round(val))
+                    hp_dict[col] = val
+            return hp_dict   
     def _mutate_numeric(self, a, b, c, col):
         # Arithmetic mutation
         val = a[col] + self.F * (b[col] - c[col])
@@ -137,29 +148,27 @@ class DEOptimizer(BaseOptimizer):
         return val
 
     def _mutate_categorical(self, a, b, c, col):
-        """
-        Simulates: v = a + F * (b - c) for categorical variables.
-        """
-        # If b and c are the same, the 'difference' is 0. 
-        # So v = a + F * (0) -> v = a
+        """DE logic for categorical variables."""
         if b[col] == c[col]:
             return a[col]
-            
-        # If b and c differ, there is a 'difference'. 
-        # We apply this difference to 'a' with probability F.
-        if random.random() < self.F:
-            # The mutation occurs. Pick one of the donor values.
-            return b[col] if random.random() < 0.5 else c[col]
-        else:
-            # The mutation fails to trigger. Stay at a.
-            return a[col]
+        return b[col] if random.random() < self.F else c[col]
+
+    def _mutate(self, a, b, c):
+        """
+        DE/rand/1 mutation: Categorical fix (added missing 'a' arg) 
+        and added clamping.
+        """
+        mutant = {}
+        for col in self.columns:
+            if col in self.num_cols:
+                mutant[col] = self._mutate_numeric(a, b, c, col)
+            else:
+                # FIX: Passed 'a' to match your function signature
+                mutant[col] = self._mutate_categorical(a, b, c, col)
+        return self._clamp(mutant)
 
     def _crossover(self, target, mutant):
-        """
-        Binomial crossover.
-        Each dimension copied from mutant with prob CR.
-        At least one dimension guaranteed from mutant (j_rand).
-        """
+        """Binomial crossover followed by mandatory clamping."""
         j_rand = random.randrange(len(self.columns))
         trial = {}
         for i, col in enumerate(self.columns):
@@ -167,7 +176,8 @@ class DEOptimizer(BaseOptimizer):
                 trial[col] = mutant[col]
             else:
                 trial[col] = target[col]
-        return trial
+        # Ensure the blended trial is valid before it hits the surrogate
+        return self._clamp(trial)
 
     # ------------------------------------------------------------------
     # Main optimise loop

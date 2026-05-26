@@ -1,12 +1,7 @@
-# optimizers/RandomSearchOptimizer.py
+# optimizers/DODGEOptimizer.py
 from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-
-import random
-import time
-import copy
-import numpy as np
 
 from optimizers.base_optimizer import BaseOptimizer
 from ConfigSpace.hyperparameters import (
@@ -16,15 +11,24 @@ from ConfigSpace.hyperparameters import (
 )
 from utils import DistanceUtil
 
+import numpy as np
+import time
+import random
+import copy
 
-class RandomSearchOptimizer(BaseOptimizer):
+class DODGEOptimizer(BaseOptimizer):
     """
-    Pure Random Search optimizer.
-    Archetype: The Ultimate Sanity Check.
-    
-    Fixed to enforce the exact same empirical 'Initialization Tax' as the 
-    Bayesian and Causal algorithms, ensuring apples-to-apples learning curves.
+    DODGE Optimizer by Agrawal et al.
+    Archetype: Model-Free Tabu Search with Epsilon-Redundancy.
+
+    Mechanism:
+      - Evaluates an initial empirical set to ensure fairness.
+      - Generates random candidate configurations in the continuous space.
+      - Discretizes the objective scores into epsilon-bins (e-Tabu list).
+      - If a configuration falls into a previously seen bin, it counts as a "strike" (redundant).
+      - If consecutive strikes exceed the patience threshold, it terminates early.
     """
+
     def __init__(self, config, model_wrapper, model_config, logging_util, seed):
         super().__init__(config, model_wrapper, model_config, logging_util, seed)
 
@@ -32,11 +36,13 @@ class RandomSearchOptimizer(BaseOptimizer):
         np.random.seed(seed)
 
         self.X_df = self.model_wrapper.X
-        self.n_rows = len(self.X_df)
         self.columns = list(self.X_df.columns)
+        self.n_rows = len(self.X_df)
+
         self.config_space, _, _ = self.model_config.get_configspace()
         self.cache = {}
 
+        # Objective counting
         test_config = {c: self._safe_clean(self.X_df.iloc[0][c]) for c in self.columns}
         self.num_objectives = len(self.model_wrapper.get_score(test_config))
 
@@ -44,14 +50,19 @@ class RandomSearchOptimizer(BaseOptimizer):
         self.best_config = None
         self.best_value = float("inf")
 
-        # The Fairness Tax
+        # DODGE Specific Hyperparameters
         self.initial_budget = int(self.config.get("initial_size", 20))
+        self.epsilon = float(self.config.get("epsilon", 0.05)) # Standard 5% epsilon grid
+        self.patience = int(self.config.get("patience", 30))   # Strikes before early stopping
+        
+        self.seen_bins = set()
+        self.strikes = 0
 
     # ------------------------------------------------------------
     # Helpers & Sampling
     # ------------------------------------------------------------
+
     def _safe_clean(self, v):
-        """Extracts native python types and truncates floats for cache stability."""
         val = v.item() if hasattr(v, "item") else v
         return round(val, 6) if isinstance(val, float) else val
 
@@ -59,12 +70,11 @@ class RandomSearchOptimizer(BaseOptimizer):
         return tuple(self._safe_clean(hp_dict[c]) for c in self.columns)
 
     def _idx_to_config(self, idx):
-        """Extracts a configuration directly from the empirical dataset."""
         row = self.X_df.iloc[idx]
         return {c: self._safe_clean(row[c]) for c in self.columns}
 
     def _sample_config(self):
-        """Generates a random configuration across the continuous ConfigSpace boundaries."""
+        """Blind random sampling (DODGE relies on sampling over modeling)."""
         hp_dict = {}
         for hp in self.config_space.get_hyperparameters():
             hp_type = type(hp).__name__
@@ -78,22 +88,21 @@ class RandomSearchOptimizer(BaseOptimizer):
                 hp_dict[hp.name] = random.uniform(hp.lower, hp.upper)
             elif hp_type == "UniformIntegerHyperparameter":
                 hp_dict[hp.name] = random.randint(int(hp.lower), int(hp.upper))
-            else:
-                raise ValueError(f"Unsupported hyperparameter type: {hp_type}")
         return hp_dict
 
     # ------------------------------------------------------------
-    # Evaluation & Tracking
+    # Evaluation & Epsilon Discretization
     # ------------------------------------------------------------
+
+    def _discretize(self, scores):
+        """Maps continuous performance scores into an epsilon-grid bin."""
+        return tuple(round(s / self.epsilon) for s in scores)
+
     def _eval_safe(self, hp_dict):
-        """Evaluates, tracks budget, and caches configuration scores."""
+        """Evaluates and caches the configuration."""
         key = self._row_tuple(hp_dict)
         if key in self.cache:
-            # If random search accidentally guesses a duplicate, it still burns an evaluation
-            self.iteration += 1
-            scores, d2h = self.cache[key]
-            self.track_evaluation(hp_dict, list(scores), self.iteration)
-            return d2h
+            return self.cache[key] 
 
         try:
             scores = tuple(self.model_wrapper.get_score(hp_dict))
@@ -111,11 +120,12 @@ class RandomSearchOptimizer(BaseOptimizer):
             self.best_value = d2h
             self.best_config = copy.deepcopy(hp_dict)
             
-        return d2h
+        return scores, d2h
 
     # ------------------------------------------------------------
     # Main Optimization Loop
     # ------------------------------------------------------------
+
     def optimize(self):
         n_trials = self.config["n_trials"]
         self.start_time = time.time()
@@ -127,14 +137,37 @@ class RandomSearchOptimizer(BaseOptimizer):
         for _ in range(obs_budget):
             idx = random.randint(0, self.n_rows - 1)
             config = self._idx_to_config(idx)
-            self._eval_safe(config)
+            scores, _ = self._eval_safe(config)
+            
+            # Map to epsilon grid
+            perf_bin = self._discretize(scores)
+            self.seen_bins.add(perf_bin)
 
         # ---------------------------------------------------------
-        # PHASE 2: Unbounded Random Search
+        # PHASE 2: DODGE Tabu Search
         # ---------------------------------------------------------
         while self.iteration < n_trials:
+            # 1. Generate random candidate
             config = self._sample_config()
-            self._eval_safe(config)
+            
+            # 2. Evaluate
+            scores, _ = self._eval_safe(config)
+            
+            # 3. Discretize into Epsilon-Bin
+            perf_bin = self._discretize(scores)
+            
+            # 4. Tabu / Redundancy Check
+            if perf_bin in self.seen_bins:
+                self.strikes += 1
+            else:
+                self.strikes = 0  # Reset strikes on a novel discovery
+                self.seen_bins.add(perf_bin)
+                
+            # 5. Early Stopping (The DODGE philosophy)
+            if self.strikes >= self.patience:
+                # DODGE assumes the space is fully mapped / flat and terminates to save budget.
+                self.logging_util.log("info", f"DODGE early stopping triggered at iteration {self.iteration} due to {self.patience} redundant strikes.")
+                break
 
         self.end_time = time.time()
         return self.best_config, self.best_value

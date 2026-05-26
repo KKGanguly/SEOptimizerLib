@@ -107,10 +107,12 @@ class GAOptimizer(BaseOptimizer):
         else:
             try:
                 scores = tuple(self.model_wrapper.get_score(hp_dict))
-            except Exception:
-                scores = tuple(1.0 for _ in range(self.num_objectives))
-            ideal = [0] * self.num_objectives
-            d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                ideal = [0] * self.num_objectives
+                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+            except Exception as e:
+                # Mathematical infinity ensures this configuration is never selected
+                scores = tuple(float('inf') for _ in range(self.num_objectives))
+                d2h_val = float('inf')
             self.cache[key] = (scores, d2h_val)
 
         self.iteration += 1
@@ -127,7 +129,7 @@ class GAOptimizer(BaseOptimizer):
                 if key in self.cache:
                     results.append(self.cache[key])
                 else:
-                    results.append((tuple(1.0 for _ in range(self.num_objectives)), 1.0))
+                    results.append((tuple(float('inf') for _ in range(self.num_objectives)), float('inf')))
             else:
                 results.append(self._evaluate(ind))
         return results
@@ -165,9 +167,12 @@ class GAOptimizer(BaseOptimizer):
                 if col in self.num_cols and col in self.bounds:
                     lower, upper = self.bounds[col]
                     span = upper - lower
-                    
-                    # Add Gaussian noise scaled to the parameter's range
-                    new_val = float(individual[col]) + np.random.normal(0.0, self.sigma * span)
+                    if span <= 1.0:
+                        # Uniformly resample across the entire bound to guarantee a chance to flip
+                        new_val = random.uniform(hp.lower, hp.upper)
+                    else:
+                        # Add Gaussian noise scaled to the parameter's range
+                        new_val = float(individual[col]) + np.random.normal(0.0, self.sigma * span)
                     
                     # Clip to bounds
                     new_val = max(lower, min(upper, new_val))
