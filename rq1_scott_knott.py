@@ -11,7 +11,7 @@ RUNTIME_COLS = ['runtime', 'time', 'wall_time', 'elapsed', 'duration']
 
 # ----------------- Scott-Knott Class -----------------
 class ScottKnott:
-    def __init__(self, alpha=0.05, bootstrap_iters=1000, cliff_delta_thresh=0.35):
+    def __init__(self, alpha=0.05, bootstrap_iters=1000, cliff_delta_thresh=0.1):
         self.alpha = alpha
         self.bootstrap_iters = bootstrap_iters
         self.cliff_delta_thresh = cliff_delta_thresh
@@ -85,8 +85,13 @@ def get_optimizer_dir(results_dir: Path, optimizer_name: str) -> Path:
         'HILL': 'HILL',
         'RandomSearch': 'RandomSearch',
         'EZR': 'EZR',
-        'DE' : 'DE',
-        'SA' : 'SA'
+        'DE': 'DE',
+        'SA': 'SA',
+        'DODGE': 'DODGE',
+        'EDA': 'EDA',
+        'SMAC': 'SMAC',
+        'SWAY': 'SWAY',
+        'PTUNE': 'PTUNE'
     }
 
     folder_name = folder_map.get(optimizer_name.split('-')[0], optimizer_name.lower())

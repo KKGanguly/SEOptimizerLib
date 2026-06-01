@@ -97,15 +97,20 @@ class SWAYOptimizer(BaseOptimizer):
         """Evaluates and caches. Returns raw scores for SWAY domination."""
         key = self._row_tuple(hp_dict)
         if key in self.cache:
-            return self.cache[key][0] 
+            self.iteration += 1
+            scores, d2h = self.cache[key]
+            try:
+                self.track_evaluation(hp_dict, list(scores), self.iteration)
+            except Exception:
+                self.logging_util.log("iteration", self.iteration)
+            return d2h # Return D2H instead of raw scores
 
         try:
-            scores = tuple(self.model_wrapper.get_score(hp_dict))
+            scores, d2h = self.model_wrapper.evaluate(hp_dict)
         except Exception:
             scores = tuple(float('inf') for _ in range(self.num_objectives))
+            d2h = float('inf')
 
-        ideal = [0] * self.num_objectives
-        d2h = DistanceUtil.d2h(ideal, list(scores))
 
         self.cache[key] = (scores, d2h)
         self.iteration += 1
@@ -115,7 +120,7 @@ class SWAYOptimizer(BaseOptimizer):
             self.best_value = d2h
             self.best_config = copy.deepcopy(hp_dict)
             
-        return scores
+        return d2h
 
     def _loss(self, f1, f2):
         """Exact authors' implementation: sum(exp(i - j)) / len(f1)"""
@@ -128,9 +133,11 @@ class SWAYOptimizer(BaseOptimizer):
 
     def _cont_dominate(self, config1, config2):
         """Exact authors' implementation of continuous domination."""
-        f1 = self._eval_safe(config1)
-        f2 = self._eval_safe(config2)
-        return self._loss(f1, f2) < self._loss(f2, f1)
+        d2h_1 = self._eval_safe(config1)
+        d2h_2 = self._eval_safe(config2)
+        
+        # Lower D2H is strictly better
+        return d2h_1 < d2h_2
 
     # ------------------------------------------------------------
     # Authors' Exact FastMap Distance & Splitting
@@ -231,10 +238,6 @@ class SWAYOptimizer(BaseOptimizer):
         # GENERATE UNLABELLED POOL
         # ---------------------------------------------------------
         pool = []
-        # Dump the entire empirical dataset in
-        for i in range(self.n_rows):
-            pool.append(self._idx_to_config(i))
-            
         # Fill the rest with continuous random samples
         while len(pool) < self.pool_size:
             pool.append(self._sample_config())
@@ -252,6 +255,17 @@ class SWAYOptimizer(BaseOptimizer):
             if self.iteration >= n_trials:
                 break
             self._eval_safe(config)
+        
+        # If SWAY finished its best leaf but still has budget left,
+        # randomly sample the remaining pool to ensure a fair benchmark.
+        if self.iteration < n_trials:
+            remaining_pool = [c for c in pool if self._row_tuple(c) not in self.cache]
+            random.shuffle(remaining_pool)
+            
+            for config in remaining_pool:
+                if self.iteration >= n_trials:
+                    break
+                self._eval_safe(config)
 
         self.end_time = time.time()
         return self.best_config, self.best_value

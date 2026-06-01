@@ -9,7 +9,11 @@ import time
 import random
 import copy
 import numpy as np
-
+from ConfigSpace.hyperparameters import (
+    OrdinalHyperparameter,
+    CategoricalHyperparameter,
+    Constant,
+)
 
 class OnePlusOneESOptimizer(BaseOptimizer):
     """
@@ -62,7 +66,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
                          if self.model_config.column_types.get(c) == 'numeric']
         self.cat_cols = [c for c in self.columns
                          if self.model_config.column_types.get(c) != 'numeric']
-        
+
         # Extract bounds and choices from ConfigSpace for safe continuous mutation
         self.config_space, _, _ = self.model_config.get_configspace()
         self.bounds = {}
@@ -98,6 +102,23 @@ class OnePlusOneESOptimizer(BaseOptimizer):
     def _random_config(self):
         return self._idx_to_config(random.randrange(self.n_rows))
 
+    def _sample_config(self):
+        """Blind random sampling (DODGE relies on sampling over modeling)."""
+        hp_dict = {}
+        for hp in self.config_space.get_hyperparameters():
+            hp_type = type(hp).__name__
+            if isinstance(hp, Constant):
+                hp_dict[hp.name] = hp.value
+            elif isinstance(hp, OrdinalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.sequence))
+            elif isinstance(hp, CategoricalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.choices))
+            elif hp_type == "UniformFloatHyperparameter":
+                hp_dict[hp.name] = random.uniform(hp.lower, hp.upper)
+            elif hp_type == "UniformIntegerHyperparameter":
+                hp_dict[hp.name] = random.randint(int(hp.lower), int(hp.upper))
+        return hp_dict
+
     # ------------------------------------------------------------------
     # Evaluation
     # ------------------------------------------------------------------
@@ -108,9 +129,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
             scores, d2h_val = self.cache[key]
         else:
             try:
-                scores = tuple(self.model_wrapper.get_score(hp_dict))
-                ideal = [0] * self.num_objectives
-                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                scores, d2h_val = self.model_wrapper.evaluate(hp_dict)
             except Exception as e:
                 # Mathematical infinity ensures this configuration is never selected
                 scores = tuple(float('inf') for _ in range(self.num_objectives))
@@ -118,7 +137,10 @@ class OnePlusOneESOptimizer(BaseOptimizer):
             self.cache[key] = (scores, d2h_val)
 
         self.iteration += 1
-        self.track_evaluation(hp_dict, list(scores), self.iteration)
+        try:
+            self.track_evaluation(hp_dict, list(scores), self.iteration)
+        except Exception:
+            self.logging_util.log("iteration", self.iteration)
         return scores, d2h_val
 
     # ------------------------------------------------------------------
@@ -137,19 +159,22 @@ class OnePlusOneESOptimizer(BaseOptimizer):
             if c in self.bounds:
                 lower, upper = self.bounds[c]
                 span = upper - lower
-                if span <= 1.0:
-                    # Uniformly resample across the entire bound to guarantee a chance to flip
-                    val = random.uniform(hp.lower, hp.upper)
+                
+                # FIX: Catch all small integers (span <= 3), not just binary (span <= 1.0)
+                if self.is_int.get(c, False) and span <= 3:
+                    current_val = offspring[c]
+                    valid_choices = [x for x in range(int(lower), int(upper) + 1) if x != current_val]
+                    val = random.choice(valid_choices) if valid_choices else current_val
                 else:
-                    # Perturb
+                    # Perturb floats and large integers
                     val = float(parent[c]) + np.random.normal(0.0, self.sigma * span)
-                
-                # Clip to bounds
-                val = max(lower, min(upper, val))
-                
-                # Enforce integers
-                if self.is_int.get(c, False):
-                    val = int(round(val))
+                    
+                    # Clip to bounds
+                    val = max(lower, min(upper, val))
+                    
+                    # Enforce large integers
+                    if self.is_int.get(c, False):
+                        val = int(round(val))
                     
                 offspring[c] = val
 
@@ -176,7 +201,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
         self.start_time = time.time()
 
         # ── Initial parent ──────────────────────────────────────────────
-        parent = self._random_config()
+        parent = self._sample_config()
         _, parent_d2h = self._evaluate(parent)
 
         if parent_d2h < self.best_value:
@@ -194,7 +219,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
             _, offspring_d2h = self._evaluate(offspring)
 
             window_total += 1
-            success = offspring_d2h <= parent_d2h
+            success = (offspring_d2h <= parent_d2h) and (offspring_d2h != float('inf'))
 
             if success:
                 parent     = offspring
@@ -222,7 +247,7 @@ class OnePlusOneESOptimizer(BaseOptimizer):
 
             # Restart if stuck
             if stagnation >= self.patience:
-                parent = self._random_config()
+                parent = self._sample_config()
                 _, parent_d2h = self._evaluate(parent)
                 stagnation = 0
                 if parent_d2h < self.best_value:

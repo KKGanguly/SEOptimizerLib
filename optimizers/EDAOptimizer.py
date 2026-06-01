@@ -10,7 +10,11 @@ import numpy as np
 import copy
 import random
 from ConfigSpace.hyperparameters import CategoricalHyperparameter, UniformFloatHyperparameter, UniformIntegerHyperparameter
-
+from ConfigSpace.hyperparameters import (
+    OrdinalHyperparameter,
+    CategoricalHyperparameter,
+    Constant,
+)
 class EDAOptimizer(BaseOptimizer):
     """
     Univariate Marginal Distribution Algorithm (UMDA).
@@ -35,12 +39,29 @@ class EDAOptimizer(BaseOptimizer):
         self.best_config = None
         self.best_value = float("inf")
 
-        self.pop_size = int(self.config.get("pop_size", 20))
+        self.pop_size = int(self.config.get("pop_size", 10))
         self.truncation_ratio = float(self.config.get("truncation_ratio", 0.5))
         self.num_parents = max(2, int(self.pop_size * self.truncation_ratio))
 
     def _clean(self, v):
         return v.item() if hasattr(v, "item") else v
+
+    def _sample_config(self):
+        """Blind random sampling (DODGE relies on sampling over modeling)."""
+        hp_dict = {}
+        for hp in self.config_space.get_hyperparameters():
+            hp_type = type(hp).__name__
+            if isinstance(hp, Constant):
+                hp_dict[hp.name] = hp.value
+            elif isinstance(hp, OrdinalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.sequence))
+            elif isinstance(hp, CategoricalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.choices))
+            elif hp_type == "UniformFloatHyperparameter":
+                hp_dict[hp.name] = random.uniform(hp.lower, hp.upper)
+            elif hp_type == "UniformIntegerHyperparameter":
+                hp_dict[hp.name] = random.randint(int(hp.lower), int(hp.upper))
+        return hp_dict
 
     def _idx_to_config(self, idx):
         row = self.X_df.iloc[idx]
@@ -51,9 +72,7 @@ class EDAOptimizer(BaseOptimizer):
         if key in self.cache:
             return self.cache[key]
         try:
-            scores = tuple(self.model_wrapper.get_score(hp_dict))
-            ideal = [0] * self.num_objectives
-            d2h_val = DistanceUtil.d2h(ideal, list(scores))
+            scores, d2h_val = self.model_wrapper.evaluate(hp_dict)
         except Exception:
             scores = tuple(float('inf') for _ in range(self.num_objectives))
             d2h_val = float('inf')
@@ -70,8 +89,8 @@ class EDAOptimizer(BaseOptimizer):
         # Initialize Population from raw dataset rows
         population = []
         for _ in range(self.pop_size):
-            initial_idx = random.randint(0, self.n_rows - 1)
-            population.append(self._idx_to_config(initial_idx))
+            initial_pop = self._sample_config()
+            population.append(initial_pop)
 
         while self.iteration < n_trials:
             # 1. Evaluate Population

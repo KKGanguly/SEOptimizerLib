@@ -9,7 +9,11 @@ import time
 import random
 import copy
 import numpy as np
-
+from ConfigSpace.hyperparameters import (
+    OrdinalHyperparameter,
+    CategoricalHyperparameter,
+    Constant,
+)
 
 class GAOptimizer(BaseOptimizer):
     """
@@ -51,7 +55,7 @@ class GAOptimizer(BaseOptimizer):
         self.best_value = float("inf")
 
         # GA parameters
-        self.pop_size      = int(self.config.get("pop_size", 20))
+        self.pop_size      = int(self.config.get("pop_size", 10))
         self.tournament_k  = int(self.config.get("tournament_k", 3))
         self.mutation_rate = float(self.config.get("mutation_rate", 0.1))
         self.elitism       = int(self.config.get("elitism", 2))
@@ -96,6 +100,23 @@ class GAOptimizer(BaseOptimizer):
         row = self.X_df.iloc[idx]
         return {c: self._safe_clean(row[c]) for c in self.columns}
 
+    def _sample_config(self):
+        """Blind random sampling (DODGE relies on sampling over modeling)."""
+        hp_dict = {}
+        for hp in self.config_space.get_hyperparameters():
+            hp_type = type(hp).__name__
+            if isinstance(hp, Constant):
+                hp_dict[hp.name] = hp.value
+            elif isinstance(hp, OrdinalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.sequence))
+            elif isinstance(hp, CategoricalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.choices))
+            elif hp_type == "UniformFloatHyperparameter":
+                hp_dict[hp.name] = random.uniform(hp.lower, hp.upper)
+            elif hp_type == "UniformIntegerHyperparameter":
+                hp_dict[hp.name] = random.randint(int(hp.lower), int(hp.upper))
+        return hp_dict
+
     # ------------------------------------------------------------------
     # Evaluation
     # ------------------------------------------------------------------
@@ -106,9 +127,7 @@ class GAOptimizer(BaseOptimizer):
             scores, d2h_val = self.cache[key]
         else:
             try:
-                scores = tuple(self.model_wrapper.get_score(hp_dict))
-                ideal = [0] * self.num_objectives
-                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                scores, d2h_val = self.model_wrapper.evaluate(hp_dict)
             except Exception as e:
                 # Mathematical infinity ensures this configuration is never selected
                 scores = tuple(float('inf') for _ in range(self.num_objectives))
@@ -116,7 +135,10 @@ class GAOptimizer(BaseOptimizer):
             self.cache[key] = (scores, d2h_val)
 
         self.iteration += 1
-        self.track_evaluation(hp_dict, list(scores), self.iteration)
+        try:
+            self.track_evaluation(hp_dict, list(scores), self.iteration)
+        except Exception:
+            self.logging_util.log("iteration", self.iteration)
         return scores, d2h_val
 
     def _evaluate_population(self, population):
@@ -167,21 +189,36 @@ class GAOptimizer(BaseOptimizer):
                 if col in self.num_cols and col in self.bounds:
                     lower, upper = self.bounds[col]
                     span = upper - lower
-                    if span <= 1.0:
-                        # Uniformly resample across the entire bound to guarantee a chance to flip
-                        new_val = random.uniform(hp.lower, hp.upper)
-                    else:
-                        # Add Gaussian noise scaled to the parameter's range
-                        new_val = float(individual[col]) + np.random.normal(0.0, self.sigma * span)
+                    current_val = mutant[col]
                     
-                    # Clip to bounds
-                    new_val = max(lower, min(upper, new_val))
-                    
-                    # Enforce integer constraints
-                    if self.is_int.get(col, False):
-                        new_val = int(round(new_val))
+                    # 1. Zero-Span Protection
+                    if span == 0:
+                        continue 
                         
-                    mutant[col] = new_val
+                    # 2. THE BOOLEAN / SMALL INTEGER CHECK
+                    elif self.is_int.get(col, False) and span <= 3:
+                        # Guarantees a mutation for binary [0, 1] and small ordinal ranges
+                        valid_choices = [x for x in range(int(lower), int(upper) + 1) if x != current_val]
+                        new_val = random.choice(valid_choices) if valid_choices else current_val
+                        mutant[col] = new_val
+                        
+                    # 3. Large Integer Mutation
+                    elif self.is_int.get(col, False):
+                        # Random integer step scaled by your GA's sigma parameter
+                        step_size = max(1, int(span * self.sigma))
+                        new_val = current_val + random.randint(-step_size, step_size)
+                        
+                        # Clip and enforce
+                        new_val = max(lower, min(upper, new_val))
+                        mutant[col] = int(round(new_val))
+                        
+                    # 4. Continuous Float Mutation
+                    else:
+                        # True Gaussian perturbation for floats, regardless of span size
+                        new_val = float(current_val) + np.random.normal(0.0, self.sigma * span)
+                        
+                        # Clip
+                        mutant[col] = max(lower, min(upper, new_val))
 
                 elif col in self.cat_cols and col in self.cat_choices:
                     choices = list(self.cat_choices[col])
@@ -204,10 +241,17 @@ class GAOptimizer(BaseOptimizer):
         self.start_time = time.time()
 
         # ── Initialise population ───────────────────────────────────────
-        indices    = random.sample(range(self.n_rows), min(self.pop_size, self.n_rows))
-        population = [self._idx_to_config(i) for i in indices]
-        results    = self._evaluate_population(population)
-        fitness    = [r[1] for r in results]
+        initial_count = min(self.pop_size, self.config["n_trials"])
+        
+        # Fill the population up to initial_count
+        if hasattr(self, "_sample_config"):
+            population = [self._sample_config() for _ in range(initial_count)]
+        else:
+            population = [self.config_space.sample_configuration().get_dictionary() for _ in range(initial_count)]
+            
+        # Evaluate
+        results = self._evaluate_population(population)
+        fitness = [r[1] for r in results]
 
         # Track initial best
         for ind, (scores, d2h_val) in zip(population, results):
@@ -219,27 +263,33 @@ class GAOptimizer(BaseOptimizer):
         while self.iteration < n_trials:
             # Sort population by fitness for elitism
             ranked = sorted(zip(fitness, population), key=lambda x: x[0])
-            elites = [copy.deepcopy(ind) for _, ind in ranked[:self.elitism]]
+            
+            # 1. Store both the config AND the fitness for elites
+            new_population = [copy.deepcopy(ind) for _, ind in ranked[:self.elitism]]
+            new_fitness = [fit for fit, _ in ranked[:self.elitism]]
 
-            # Build new generation
-            new_population = list(elites)
-
-            while len(new_population) < self.pop_size:
+            # 2. Build ONLY children
+            children = []
+            while (len(new_population) + len(children)) < self.pop_size:
                 parent_a = self._tournament_select(population, fitness)
                 parent_b = self._tournament_select(population, fitness)
                 child    = self._crossover(parent_a, parent_b)
                 child    = self._mutate(child)
-                new_population.append(child)
+                children.append(child)
 
-            # Evaluate new generation (elites may hit cache)
-            new_results = self._evaluate_population(new_population)
-            new_fitness = [r[1] for r in new_results]
+            # 3. Evaluate ONLY the new children
+            child_results = self._evaluate_population(children)
+            child_fitness = [r[1] for r in child_results]
 
-            # Update best
-            for ind, (scores, d2h_val) in zip(new_population, new_results):
+            # 4. Update best (checking only the newly evaluated children)
+            for ind, (scores, d2h_val) in zip(children, child_results):
                 if d2h_val < self.best_value:
                     self.best_value  = d2h_val
                     self.best_config = copy.deepcopy(ind)
+
+            # 5. Merge elites and evaluated children for the next generation
+            new_population.extend(children)
+            new_fitness.extend(child_fitness)
 
             population = new_population
             fitness    = new_fitness

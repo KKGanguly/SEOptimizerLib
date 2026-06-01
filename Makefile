@@ -1,7 +1,7 @@
 DATASETS_DIR = moot/optimize
 COMMAND_FILE = commands.sh
 NAME ?= SMAC
-BUDGETS ?= 6 12 18 24 50 100 200
+BUDGETS ?= 50 100 200
 
 BASE_CMD = python3 experiment_runner_cluster.py \
 	--name $(NAME) \

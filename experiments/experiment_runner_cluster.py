@@ -54,6 +54,7 @@ def init_optimizer(optimizer_name, optimizer_config, model_wrapper, model_config
         'EDA' : EDAOptimizer,
         'PSO' : PSOOptimizer,
         'PTUNE' : PromiseTuneOptimizer,
+        'PTUNER' : PromiseTuneOptimizerRepl,
         'SWAY' : SWAYOptimizer,
         'DODGE' : DODGEOptimizer
     }
@@ -193,6 +194,7 @@ def run_single_repeat(logging_dir, data_name, model_wrapper, model_config,
     log_filename = os.path.join(logging_dir, optimizer_name, f"{data_name}_{checkpoint}_{seed}.csv")
     
     model_config.set_seed(seed)
+    model_wrapper.set_seed(seed)
     
     # Initialize optimizer
     optimizer_obj = init_optimizer(optimizer_name, optimizer, model_wrapper, model_config, seed)

@@ -16,6 +16,7 @@ from .OnePlusOneOptimizer import OnePlusOneESOptimizer
 from .EDAOptimizer import EDAOptimizer
 from .PSOOptimizer import PSOOptimizer
 from .PromiseTuneOptimizer import PromiseTuneOptimizer
+from .PromiseTuneOptimizerRepl import PromiseTuneOptimizerRepl
 from .SWAYOptimizer import SWAYOptimizer
 from .DODGEOptimizer import DODGEOptimizer
 from .MOEADOptimizer import MOEADOptimizer

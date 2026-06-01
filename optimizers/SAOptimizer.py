@@ -85,6 +85,23 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
     # Helpers
     # ------------------------------------------------------------------
 
+    def _sample_config(self):
+        """Blind random sampling (DODGE relies on sampling over modeling)."""
+        hp_dict = {}
+        for hp in self.config_space.get_hyperparameters():
+            hp_type = type(hp).__name__
+            if isinstance(hp, Constant):
+                hp_dict[hp.name] = hp.value
+            elif isinstance(hp, OrdinalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.sequence))
+            elif isinstance(hp, CategoricalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.choices))
+            elif hp_type == "UniformFloatHyperparameter":
+                hp_dict[hp.name] = random.uniform(hp.lower, hp.upper)
+            elif hp_type == "UniformIntegerHyperparameter":
+                hp_dict[hp.name] = random.randint(int(hp.lower), int(hp.upper))
+        return hp_dict
+
     def _safe_clean(self, v):
         """Clean items and round floats slightly to prevent cache bloat."""
         val = v.item() if hasattr(v, "item") else v
@@ -112,9 +129,7 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
             scores, d2h_val = self.cache[key]
         else:
             try:
-                scores = tuple(self.model_wrapper.get_score(hp_dict))
-                ideal = [0] * self.num_objectives
-                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                scores, d2h_val = self.model_wrapper.evaluate(hp_dict)
             except Exception as e:
                 # Mathematical infinity ensures this configuration is never selected
                 scores = tuple(float('inf') for _ in range(self.num_objectives))
@@ -153,11 +168,29 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
             if name in self.bounds:
                 lower, upper = self.bounds[name]
                 span = upper - lower
-                if span <= 1.0:
-                    # Uniformly resample across the entire bound to guarantee a chance to flip
-                    new_val = random.uniform(hp.lower, hp.upper)
+                
+                # 1. Zero-Span Protection
+                if span == 0:
+                    mutant[name] = current_val
+                    continue
+                    
+                # 2. THE BOOLEAN / SMALL INTEGER CHECK
+                elif self.is_int.get(name, False) and span <= 3:
+                    # Mathematically guarantees a flip/change for booleans [0, 1] 
+                    # and small ordinals [0, 1, 2]
+                    valid_choices = [x for x in range(int(lower), int(upper) + 1) if x != current_val]
+                    new_val = random.choice(valid_choices) if valid_choices else current_val
+                    
+                # 3. Large Integer Mutation
+                elif self.is_int.get(name, False):
+                    # Random integer step up to 10% of the span
+                    step_size = max(1, int(span * 0.1))
+                    new_val = current_val + random.randint(-step_size, step_size)
+                    
+                # 4. Continuous Float Mutation
                 else:
-                    std = span * 0.1 # 10% Gaussian noise
+                    # True SA gradient steps for floats, regardless of how small the span is
+                    std = span * 0.1 
                     new_val = current_val + random.gauss(0, std)
                 
                 # Bounds clipping
@@ -189,12 +222,24 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
     # ------------------------------------------------------------------
 
     def _accept(self, current_d2h, candidate_d2h, temperature):
+        # FIX: Handle infinities explicitly before math operations
+        if candidate_d2h == float('inf'):
+            return False
+        if current_d2h == float('inf'):
+            return True # Always step away from a crash
+            
         delta = candidate_d2h - current_d2h
         if delta < 0:
-            # Always accept improvements
             return True
-        # Accept worse solution with probability exp(-delta / T)
-        return random.random() < math.exp(-delta / temperature)
+            
+        # FIX: Prevent division by zero if temp underflows
+        safe_temp = max(temperature, 1e-9)
+        
+        # FIX: Prevent OverflowError if delta is massively large
+        try:
+            return random.random() < math.exp(-delta / safe_temp)
+        except OverflowError:
+            return False # exp(-huge) approaches 0 anyway
 
     # ------------------------------------------------------------------
     # Main optimise loop
@@ -207,14 +252,14 @@ class SimulatedAnnealingOptimizer(BaseOptimizer):
         temperature = self.initial_temp
 
         # ── Random initial solution ─────────────────────────────────────
-        current_config = self._random_config()
+        current_config = self._sample_config()
         current_config, _, current_d2h = self._evaluate(current_config)
 
         self.best_value = current_d2h
         self.best_config = copy.deepcopy(current_config)
 
         # ── SA loop ─────────────────────────────────────────────────────
-        while self.iteration < n_trials and temperature > self.min_temp:
+        while self.iteration < n_trials:
 
             # 1. Generate ONE continuous neighbour via mutation
             candidate = self._mutate(current_config)

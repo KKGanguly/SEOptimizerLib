@@ -45,7 +45,7 @@ class RandomSearchOptimizer(BaseOptimizer):
         self.best_value = float("inf")
 
         # The Fairness Tax
-        self.initial_budget = int(self.config.get("initial_size", 20))
+        self.initial_budget = int(self.config.get("initial_size", 10))
 
     # ------------------------------------------------------------
     # Helpers & Sampling
@@ -96,12 +96,10 @@ class RandomSearchOptimizer(BaseOptimizer):
             return d2h
 
         try:
-            scores = tuple(self.model_wrapper.get_score(hp_dict))
+            scores, d2h = self.model_wrapper.evaluate(hp_dict)
         except Exception:
             scores = tuple(float('inf') for _ in range(self.num_objectives))
-
-        ideal = [0] * self.num_objectives
-        d2h = DistanceUtil.d2h(ideal, list(scores))
+            d2h_val = float('inf')
 
         self.cache[key] = (scores, d2h)
         self.iteration += 1
@@ -120,18 +118,7 @@ class RandomSearchOptimizer(BaseOptimizer):
         n_trials = self.config["n_trials"]
         self.start_time = time.time()
 
-        # ---------------------------------------------------------
-        # PHASE 1: The Fairness Tax (Blind Empirical Start)
-        # ---------------------------------------------------------
-        obs_budget = min(self.initial_budget, n_trials)
-        for _ in range(obs_budget):
-            idx = random.randint(0, self.n_rows - 1)
-            config = self._idx_to_config(idx)
-            self._eval_safe(config)
-
-        # ---------------------------------------------------------
-        # PHASE 2: Unbounded Random Search
-        # ---------------------------------------------------------
+        
         while self.iteration < n_trials:
             config = self._sample_config()
             self._eval_safe(config)

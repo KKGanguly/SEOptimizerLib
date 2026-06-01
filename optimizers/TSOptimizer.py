@@ -15,7 +15,11 @@ import random
 import copy
 from collections import deque
 import numpy as np
-
+from ConfigSpace.hyperparameters import (
+    OrdinalHyperparameter,
+    CategoricalHyperparameter,
+    Constant,
+)
 
 class TabuSearchOptimizer(BaseOptimizer):
     """
@@ -121,9 +125,7 @@ class TabuSearchOptimizer(BaseOptimizer):
             scores, d2h_val = self.cache[key]
         else:
             try:
-                scores = tuple(self.model_wrapper.get_score(hp_dict))
-                ideal = [0] * self.num_objectives
-                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                scores, d2h_val = self.model_wrapper.evaluate(hp_dict)
             except Exception as e:
                 # Mathematical infinity ensures this configuration is never selected
                 scores = tuple(float('inf') for _ in range(self.num_objectives))
@@ -162,20 +164,17 @@ class TabuSearchOptimizer(BaseOptimizer):
             if name in self.bounds:
                 lower, upper = self.bounds[name]
                 span = upper - lower
-                if span <= 1.0:
-                    # Uniformly resample across the entire bound to guarantee a chance to flip
-                    new_val = random.uniform(hp.lower, hp.upper)
+                
+                # FIX: Discrete Interceptor
+                if self.is_int.get(name, False) and span <= 3:
+                    valid_choices = [x for x in range(int(lower), int(upper) + 1) if x != current_val]
+                    new_val = random.choice(valid_choices) if valid_choices else current_val
                 else:
-                    std = span * 0.1 # 10% Gaussian noise
+                    std = span * 0.1
                     new_val = current_val + random.gauss(0, std)
-                
-                # Bounds clipping
-                new_val = max(lower, min(upper, new_val))
-                
-                # Integer enforcing
-                if self.is_int.get(name, False):
-                    new_val = int(round(new_val))
-                    
+                    new_val = max(lower, min(upper, new_val))
+                    if self.is_int.get(name, False):
+                        new_val = int(round(new_val))
                 mutant[name] = new_val
                 mutated_any = True
 
@@ -197,6 +196,23 @@ class TabuSearchOptimizer(BaseOptimizer):
         """Generate `neighbor_size` synthetic continuous neighbors."""
         return [self._mutate(current_config, force_one=False) for _ in range(self.neighbor_size)]
 
+    def _sample_config(self):
+        """Blind random sampling (DODGE relies on sampling over modeling)."""
+        hp_dict = {}
+        for hp in self.config_space.get_hyperparameters():
+            hp_type = type(hp).__name__
+            if isinstance(hp, Constant):
+                hp_dict[hp.name] = hp.value
+            elif isinstance(hp, OrdinalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.sequence))
+            elif isinstance(hp, CategoricalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.choices))
+            elif hp_type == "UniformFloatHyperparameter":
+                hp_dict[hp.name] = random.uniform(hp.lower, hp.upper)
+            elif hp_type == "UniformIntegerHyperparameter":
+                hp_dict[hp.name] = random.randint(int(hp.lower), int(hp.upper))
+        return hp_dict
+
     # ------------------------------------------------------------------
     # Main optimise loop
     # ------------------------------------------------------------------
@@ -206,7 +222,7 @@ class TabuSearchOptimizer(BaseOptimizer):
         self.start_time = time.time()
 
         # ── Random initial solution ─────────────────────────────────────
-        current_config = self._random_config()
+        current_config = self._sample_config()
         current_config, _, current_d2h = self._evaluate(current_config)
         self._add_tabu(current_config)
 

@@ -2,7 +2,11 @@
 from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-
+from ConfigSpace.hyperparameters import (
+    OrdinalHyperparameter,
+    CategoricalHyperparameter,
+    Constant,
+)
 from optimizers.base_optimizer import BaseOptimizer
 from utils import DistanceUtil
 import time
@@ -48,7 +52,7 @@ class DEOptimizer(BaseOptimizer):
         self.best_value = float("inf")
 
         # DE parameters
-        self.pop_size = int(self.config.get("pop_size", 20))
+        self.pop_size = int(self.config.get("pop_size", 10))
         self.F        = float(self.config.get("F", 0.8))   # mutation factor
         self.CR       = float(self.config.get("CR", 0.9))  # crossover rate
 
@@ -94,9 +98,8 @@ class DEOptimizer(BaseOptimizer):
             scores, d2h_val = self.cache[key]
         else:
             try:
-                scores = tuple(self.model_wrapper.get_score(hp_dict))
-                ideal = [0] * self.num_objectives
-                d2h_val = DistanceUtil.d2h(ideal, list(scores))
+                scores, d2h_val = self.model_wrapper.evaluate(hp_dict)
+                
             except Exception as e:
                 # Mathematical infinity ensures this configuration is never selected
                 scores = tuple(float('inf') for _ in range(self.num_objectives))
@@ -111,17 +114,34 @@ class DEOptimizer(BaseOptimizer):
     # DE operators
     # ------------------------------------------------------------------
 
-    def _mutate(self, a, b, c):
-        """
-        DE/rand/1 mutation with bounds clipping.
-        """
-        mutant = {}
-        for col in self.columns:
-            if col in self.num_cols:
-                mutant[col] = self._mutate_numeric(a, b, c, col)
-            else:
-                mutant[col] = self._mutate_categorical(b, c, col)
-        return mutant
+    # def _mutate(self, a, b, c):
+    #     """
+    #     DE/rand/1 mutation with bounds clipping.
+    #     """
+    #     mutant = {}
+    #     for col in self.columns:
+    #         if col in self.num_cols:
+    #             mutant[col] = self._mutate_numeric(a, b, c, col)
+    #         else:
+    #             mutant[col] = self._mutate_categorical(b, c, col)
+    #     return mutant
+
+    def _sample_config(self):
+        """Blind random sampling (DODGE relies on sampling over modeling)."""
+        hp_dict = {}
+        for hp in self.config_space.get_hyperparameters():
+            hp_type = type(hp).__name__
+            if isinstance(hp, Constant):
+                hp_dict[hp.name] = hp.value
+            elif isinstance(hp, OrdinalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.sequence))
+            elif isinstance(hp, CategoricalHyperparameter):
+                hp_dict[hp.name] = random.choice(list(hp.choices))
+            elif hp_type == "UniformFloatHyperparameter":
+                hp_dict[hp.name] = random.uniform(hp.lower, hp.upper)
+            elif hp_type == "UniformIntegerHyperparameter":
+                hp_dict[hp.name] = random.randint(int(hp.lower), int(hp.upper))
+        return hp_dict
 
     def _clamp(self, hp_dict):
             """Helper to enforce bounds after any operation."""
@@ -133,7 +153,22 @@ class DEOptimizer(BaseOptimizer):
                     hp_dict[col] = val
             return hp_dict   
     def _mutate_numeric(self, a, b, c, col):
-        # Arithmetic mutation
+        if col in self.bounds:
+            lower, upper = self.bounds[col]
+            span = upper - lower
+            
+            # -----------------------------------------------------------
+            # THE BINARY / SMALL INTEGER INTERCEPTOR
+            # Prevents rounding gravity from locking the search space.
+            # -----------------------------------------------------------
+            if self.is_int.get(col, False) and span <= 3:
+                # If difference is zero, no differential exists
+                if b[col] == c[col]:
+                    return a[col]
+                # Re-purpose F as a probability to adopt the difference
+                return b[col] if random.random() < self.F else c[col]
+
+        # Standard arithmetic mutation for continuous/large-span integer variables
         val = a[col] + self.F * (b[col] - c[col])
         
         # Clip to valid bounds so surrogate doesn't break
@@ -141,7 +176,7 @@ class DEOptimizer(BaseOptimizer):
             lower, upper = self.bounds[col]
             val = max(lower, min(upper, val))
             
-        # Enforce integer types
+        # Enforce integer types (safe for large spans where F*(b-c) > 0.5)
         if self.is_int.get(col, False):
             val = int(round(val))
             
@@ -188,8 +223,14 @@ class DEOptimizer(BaseOptimizer):
         self.start_time = time.time()
 
         # ── Initialise population with random dataset rows ──────────────
-        indices = random.sample(range(self.n_rows), min(self.pop_size, self.n_rows))
-        population = [self._idx_to_config(i) for i in indices]
+        population = []
+        # Ensure we don't sample more than the budget allows
+        num_initial = min(self.pop_size, n_trials) 
+        
+        for _ in range(num_initial):
+            # Sample a completely random configuration within the legal boundaries
+            sampled_config = self._sample_config()
+            population.append(sampled_config)
         fitness = []
 
         for ind in population:
@@ -200,7 +241,8 @@ class DEOptimizer(BaseOptimizer):
             if d2h_val < self.best_value:
                 self.best_value = d2h_val
                 self.best_config = copy.deepcopy(ind)
-
+        if len(fitness) < len(population):
+            population = population[:len(fitness)]
         # ── DE main loop ────────────────────────────────────────────────
         while self.iteration < n_trials:
             new_population = []
@@ -225,7 +267,8 @@ class DEOptimizer(BaseOptimizer):
                 scores, trial_d2h = self._evaluate(trial)
 
                 # Selection: greedy replacement
-                if trial_d2h <= fitness[i]:
+                # FIX: Prevent inf from replacing inf
+                if trial_d2h < fitness[i] or (trial_d2h == fitness[i] and trial_d2h != float('inf')):
                     new_population.append(trial)
                     new_fitness.append(trial_d2h)
                     if trial_d2h < self.best_value:

@@ -17,7 +17,7 @@ class ModelWrapperStatic:
         self.column_types = model_config.column_types
         self.seed = seed
         self.X = X  # already encoded by experiment runner
- 
+        
         # ------------------------------------------------------------------
         # Normalise y
         # ------------------------------------------------------------------
@@ -45,19 +45,22 @@ class ModelWrapperStatic:
             for idx, row in self.X.iterrows()
         }
  
-        # ------------------------------------------------------------------
+        ## ------------------------------------------------------------------
         # RF surrogate — trained once at init, cached to disk by dataset hash
         # ------------------------------------------------------------------
+        #self._train_rf_surrogate()
+    
+    def set_seed(self, seed):
+        self.seed = seed
         self._train_rf_surrogate()
- 
+
     # -----------------------------------------------------------------------
     # RF surrogate: training
     # -----------------------------------------------------------------------
     def _dataset_hash(self) -> str:
         """Stable hash of X content + y content for cache keying."""
-        h = hashlib.md5(
-            (self.X.to_csv(index=False) + self.y.to_csv(index=False)).encode()
-        ).hexdigest()[:16]
+        hash_string = self.X.to_csv(index=False) + self.y.to_csv(index=False) + str(self.seed)
+        h = hashlib.md5(hash_string.encode()).hexdigest()[:16]
         return h
  
     def _rf_cache_path(self) -> str:
@@ -105,9 +108,9 @@ class ModelWrapperStatic:
         n_outputs = y_raw.shape[1]
  
         base_rf = RandomForestRegressor(
-            n_estimators=200,
-            max_features='sqrt',
-            min_samples_leaf=1,
+            n_estimators=100,
+            max_features=1.0,
+            min_samples_leaf=4,
             random_state=self.seed,
             n_jobs=-1,
         )
@@ -144,7 +147,7 @@ class ModelWrapperStatic:
         if self._single_output:
             return (float(preds),)
         return tuple(float(p) for p in preds)
- 
+    
     # -----------------------------------------------------------------------
     # Legacy helpers — kept for backward compatibility
     # -----------------------------------------------------------------------

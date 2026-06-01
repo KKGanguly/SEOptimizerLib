@@ -51,7 +51,7 @@ class DODGEOptimizer(BaseOptimizer):
         self.best_value = float("inf")
 
         # DODGE Specific Hyperparameters
-        self.initial_budget = int(self.config.get("initial_size", 20))
+        self.initial_budget = int(self.config.get("initial_size", 10))
         self.epsilon = float(self.config.get("epsilon", 0.05)) # Standard 5% epsilon grid
         self.patience = int(self.config.get("patience", 30))   # Strikes before early stopping
         
@@ -102,15 +102,20 @@ class DODGEOptimizer(BaseOptimizer):
         """Evaluates and caches the configuration."""
         key = self._row_tuple(hp_dict)
         if key in self.cache:
-            return self.cache[key] 
+            self.iteration += 1
+            scores, d2h = self.cache[key]
+            try:
+                self.track_evaluation(hp_dict, list(scores), self.iteration)
+            except Exception:
+                self.logging_util.log("iteration", self.iteration)
+            return scores, d2h 
 
         try:
-            scores = tuple(self.model_wrapper.get_score(hp_dict))
+            scores, d2h = self.model_wrapper.evaluate(hp_dict)
         except Exception:
             scores = tuple(float('inf') for _ in range(self.num_objectives))
+            d2h = float('inf')
 
-        ideal = [0] * self.num_objectives
-        d2h = DistanceUtil.d2h(ideal, list(scores))
 
         self.cache[key] = (scores, d2h)
         self.iteration += 1
@@ -135,14 +140,14 @@ class DODGEOptimizer(BaseOptimizer):
         # ---------------------------------------------------------
         obs_budget = min(self.initial_budget, n_trials)
         for _ in range(obs_budget):
-            idx = random.randint(0, self.n_rows - 1)
-            config = self._idx_to_config(idx)
+            config = self._sample_config()
             scores, _ = self._eval_safe(config)
             
             # Map to epsilon grid
             perf_bin = self._discretize(scores)
             self.seen_bins.add(perf_bin)
 
+        early_stop_triggered = False
         # ---------------------------------------------------------
         # PHASE 2: DODGE Tabu Search
         # ---------------------------------------------------------
@@ -166,8 +171,19 @@ class DODGEOptimizer(BaseOptimizer):
             # 5. Early Stopping (The DODGE philosophy)
             if self.strikes >= self.patience:
                 # DODGE assumes the space is fully mapped / flat and terminates to save budget.
+                early_stop_triggered = True
                 self.logging_util.log("info", f"DODGE early stopping triggered at iteration {self.iteration} due to {self.patience} redundant strikes.")
                 break
+
+        # Added AFTER the main while loop:
+        if early_stop_triggered:
+            while self.iteration < n_trials:
+                self.iteration += 1
+                try:
+                    # Pad the remaining budget with the best known configuration
+                    self.track_evaluation(self.best_config, [0]*self.num_objectives, self.iteration)
+                except Exception:
+                    self.logging_util.log("iteration", self.iteration)
 
         self.end_time = time.time()
         return self.best_config, self.best_value
