@@ -11,7 +11,7 @@ RUNTIME_COLS = ['runtime', 'time', 'wall_time', 'elapsed', 'duration']
 
 # ----------------- Scott-Knott Class -----------------
 class ScottKnott:
-    def __init__(self, alpha=0.05, bootstrap_iters=1000, cliff_delta_thresh=0.1):
+    def __init__(self, alpha=0.05, bootstrap_iters=1000, cliff_delta_thresh=0.147):
         self.alpha = alpha
         self.bootstrap_iters = bootstrap_iters
         self.cliff_delta_thresh = cliff_delta_thresh
@@ -294,7 +294,22 @@ def main():
         except Exception:
             continue
 
-    generate_table(Path(args.results_dir), args.optimizers, optimizer_budgets, args.output)
+    # --- NEW OUTPUT ROUTING LOGIC ---
+    original_output = Path(args.output)
+    
+    # Create a string of all optimizers joined by underscores (e.g., "SA_ILS")
+    opts_string = "_".join(args.optimizers)
+    
+    new_filename = f"{original_output.stem}_{opts_string}{original_output.suffix}"
+    # 2. Target the 'scott_knott' folder
+    final_output_path = Path("scott_knott") / new_filename
+    
+    # 3. Ensure the 'scott_knott' directory exists before saving
+    final_output_path.parent.mkdir(parents=True, exist_ok=True)
+    # --------------------------------
+
+    # Pass the newly routed path string to generate_table
+    generate_table(Path(args.results_dir), args.optimizers, optimizer_budgets, str(final_output_path))
 
 
 if __name__ == '__main__':
