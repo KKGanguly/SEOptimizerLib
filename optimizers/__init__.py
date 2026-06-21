@@ -21,3 +21,5 @@ from .SWAYOptimizer import SWAYOptimizer
 from .DODGEOptimizer import DODGEOptimizer
 from .MOEADOptimizer import MOEADOptimizer
 from .SMSEMOAOptimizer import SMSEMOAOptimizer
+from .INGSOptimizer import INGSOptimizer
+
