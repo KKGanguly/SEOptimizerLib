@@ -56,7 +56,8 @@ def init_optimizer(optimizer_name, optimizer_config, model_wrapper, model_config
         'PTUNE' : PromiseTuneOptimizer,
         'PTUNER' : PromiseTuneOptimizerRepl,
         'SWAY' : SWAYOptimizer,
-        'DODGE' : DODGEOptimizer
+        'DODGE' : DODGEOptimizer,
+        'INGS' : INGSOptimizer
     }
     
     if optimizer_name not in optimizer_classes:
